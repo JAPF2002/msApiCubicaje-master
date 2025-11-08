@@ -1,5 +1,12 @@
-const store = require('../../../../store');
+// MSAPICUBICAJE-MASTER/src/api/components/item/controller/index.js
 
-const ctrl = require('./controller');
+const config = require('../../../../../config');
+const createRemoteDB = require('../../../../store/remote');
+const controllerFactory = require('./controller');
 
-module.exports = ctrl(store);
+const store = createRemoteDB(
+  config.mysqlService.host,
+  config.mysqlService.port
+);
+
+module.exports = controllerFactory(store);

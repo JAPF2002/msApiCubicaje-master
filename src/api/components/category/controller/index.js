@@ -1,4 +1,4 @@
-// MSAPICUBICAJE-MASTER/src/api/components/bodega/controller/index.js
+// src/api/components/category/index.js
 
 const config = require('../../../../../config');
 const createRemoteDB = require('../../../../store/remote');

@@ -1,120 +1,208 @@
+// src/api/components/bodega/network.js
 const express = require('express');
-const ctrl = require('./controller');
-const response = require('../../../utils/response');
-const pool = require('../../../utils/connection');
-
 const router = express.Router();
+const db = require('../../../store'); // 👈 ESTE
 
-// Helper de consulta con promesa
-const q = (sql, p = []) =>
-  new Promise((resolve, reject) =>
-    pool.query(sql, p, (err, rows) => (err ? reject(err) : resolve(rows)))
-  );
+// Wrapper a Promesa usando db.query (callback-style adaptado)
+function q(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.query(sql, params, (err, rows) => {
+      if (err) return reject(err);
+      resolve(rows);
+    });
+  });
+}
 
-/* -------------------- Rutas CRUD básicas -------------------- */
+
+/**
+ * GET /api/bodegas
+ * Lista todas las bodegas.
+ */
 router.get('/', async (req, res) => {
   try {
-    const data = await ctrl.list();
-    // Si usas soft delete, puedes filtrar aquí
-    const onlyActive = Array.isArray(data)
-      ? data.filter(b => (b.is_active ?? 1) === 1)
-      : data;
-    response.success(req, res, 200, onlyActive);
+    const rows = await q(
+      `SELECT
+         id_bodega,
+         nombre,
+         ciudad,
+         direccion,
+         ancho,
+         largo,
+         alto,
+         id_usuario,
+         activo           AS is_active,
+         fecha_eliminacion AS deleted_at,
+         fecha_creacion    AS created_at,
+         fecha_actualizacion AS updated_at
+       FROM bodegas
+       ORDER BY id_bodega ASC`
+    );
+
+    console.log('[GET /api/bodegas] ->', rows.length, 'registros');
+    res.json({ error: false, status: 200, body: rows });
   } catch (err) {
-    response.error(req, res, 500, err.message || err);
+    console.log('[GET /api/bodegas] ERROR:', err);
+    res.status(500).json({
+      error: true,
+      status: 500,
+      message: 'Error obteniendo bodegas',
+    });
   }
 });
 
-router.get('/:id', async (req, res) => {
-  try {
-    const data = await ctrl.get(req.params.id);
-    response.success(req, res, 200, data);
-  } catch (err) {
-    response.error(req, res, 500, err.message || err);
-  }
-});
-
+/**
+ * POST /api/bodegas
+ * Crea una nueva bodega.
+ */
 router.post('/', async (req, res) => {
   try {
-    const result = await ctrl.insert(req.body);
-    const id = result?.insertId || result?.id;
-    const data = id ? await ctrl.get(id) : (result || req.body);
-    response.success(req, res, 201, data);
-  } catch (err) {
-    response.error(req, res, 400, err.message || err);
-  }
-});
+    const {
+      nombre,
+      ciudad,
+      direccion,
+      ancho,
+      largo,
+      alto,
+      id_usuario,
+      activo = 1,
+    } = req.body;
 
-router.put('/', async (req, res) => {
-  try {
-    const data = await ctrl.update(req.body); // { id, ...campos }
-    response.success(req, res, 200, data);
-  } catch (err) {
-    response.error(req, res, 400, err.message || err);
-  }
-});
-
-/* -------------------- DELETE con “sin asignar” --------------------
-   Flujo:
-   - Si la bodega tiene ítems → 409 para que la UI muestre advertencia.
-   - Si confirman: DELETE /api/bodegas/:id?mode=unassign
-       * Pasa sus ítems a status='unassigned', bodega_id=NULL
-       * Soft delete de la bodega
-------------------------------------------------------------------- */
-router.delete('/:id', async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const mode = String(req.query.mode || '').toLowerCase();
-
-    // 1) ¿Cuántos ítems activos tiene esta bodega?
-    const row = await q(
-      `SELECT COUNT(*) AS c
-         FROM items
-        WHERE bodega_id = ?
-          AND (is_active IS NULL OR is_active = 1)`,
-      [id]
-    );
-    const count = Number(row[0].c || 0);
-
-    // 2) Si tiene ítems y no confirmaron todavía → 409
-    if (count > 0 && mode !== 'unassign') {
-      return response.error(req, res, 409, {
-        message: `La bodega tiene ${count} ítem(s). Si confirmas, los pondré como "sin asignar".`,
-        hasItems: true,
-        count,
-        canForce: true,
-        nextMode: 'unassign',
+    if (!nombre || !direccion) {
+      return res.status(400).json({
+        error: true,
+        status: 400,
+        message: 'nombre y direccion son obligatorios',
       });
     }
 
-    // 3) Si confirmaron, pasar ítems a “sin asignar”
-    if (count > 0 && mode === 'unassign') {
-      await q(
-        `UPDATE items
-            SET bodega_id = NULL,
-                status = 'unassigned'
-          WHERE bodega_id = ?
-            AND (is_active IS NULL OR is_active = 1)`,
-        [id]
-      );
+    const result = await q(
+      `INSERT INTO bodegas
+         (nombre, ciudad, direccion, ancho, largo, alto, id_usuario, activo, fecha_creacion, fecha_actualizacion)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        nombre,
+        ciudad || null,
+        direccion,
+        ancho || 0,
+        largo || 0,
+        alto || 0,
+        id_usuario || null,
+        activo ? 1 : 0,
+      ]
+    );
+
+    res.json({
+      error: false,
+      status: 201,
+      body: { id_bodega: result.insertId },
+    });
+  } catch (err) {
+    console.log('[POST /api/bodegas] ERROR:', err);
+    res.status(400).json({
+      error: true,
+      status: 400,
+      message: 'Error creando bodega',
+    });
+  }
+});
+
+/**
+ * PUT /api/bodegas/:id
+ * Actualiza bodega existente.
+ */
+router.put('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      nombre,
+      ciudad,
+      direccion,
+      ancho,
+      largo,
+      alto,
+      id_usuario,
+      is_active,
+      activo,
+    } = req.body;
+
+    const fields = [];
+    const params = [];
+
+    if (nombre !== undefined) { fields.push('nombre = ?'); params.push(nombre); }
+    if (ciudad !== undefined) { fields.push('ciudad = ?'); params.push(ciudad); }
+    if (direccion !== undefined) { fields.push('direccion = ?'); params.push(direccion); }
+    if (ancho !== undefined) { fields.push('ancho = ?'); params.push(ancho); }
+    if (largo !== undefined) { fields.push('largo = ?'); params.push(largo); }
+    if (alto !== undefined) { fields.push('alto = ?'); params.push(alto); }
+    if (id_usuario !== undefined) { fields.push('id_usuario = ?'); params.push(id_usuario); }
+
+    const activeValue =
+      typeof is_active === 'number' || typeof is_active === 'boolean'
+        ? (is_active ? 1 : 0)
+        : typeof activo === 'number' || typeof activo === 'boolean'
+        ? (activo ? 1 : 0)
+        : undefined;
+
+    if (activeValue !== undefined) {
+      fields.push('activo = ?');
+      params.push(activeValue);
     }
 
-    // 4) Soft delete de la bodega (no se borra físicamente)
+    fields.push('fecha_actualizacion = NOW()');
+
+    const sql = `
+      UPDATE bodegas
+      SET ${fields.join(', ')}
+      WHERE id_bodega = ?
+    `;
+    params.push(id);
+
+    await q(sql, params);
+
+    res.json({
+      error: false,
+      status: 200,
+      body: { id_bodega: id },
+    });
+  } catch (err) {
+    console.log('[PUT /api/bodegas/:id] ERROR:', err);
+    res.status(400).json({
+      error: true,
+      status: 400,
+      message: 'Error actualizando bodega',
+    });
+  }
+});
+
+/**
+ * DELETE /api/bodegas/:id
+ * Soft delete: activo=0 y fecha_eliminacion.
+ */
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
     await q(
       `UPDATE bodegas
-          SET is_active = 0,
-              deleted_at = NOW()
-        WHERE id = ?`,
+       SET activo = 0,
+           fecha_eliminacion = NOW(),
+           fecha_actualizacion = NOW()
+       WHERE id_bodega = ?`,
       [id]
     );
 
-    return response.success(req, res, 200, {
-      ok: true,
-      bodegaId: id,
-      unassigned: count,
+    res.json({
+      error: false,
+      status: 200,
+      body: { id_bodega: id },
     });
   } catch (err) {
-    return response.error(req, res, 500, err.message || err);
+    console.log('[DELETE /api/bodegas/:id] ERROR:', err);
+    res.status(400).json({
+      error: true,
+      status: 400,
+      message: 'Error eliminando bodega',
+    });
   }
 });
 

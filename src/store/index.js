@@ -1,4 +1,8 @@
+// msApiCubicaje-master/src/store/index.js
 const remote = require('./remote');
 const config = require('../../config');
 
-module.exports = new remote(config.mysqlService.host, config.mysqlService.port);
+module.exports = new remote(
+  config.mysqlService.host,
+  config.mysqlService.port
+);
