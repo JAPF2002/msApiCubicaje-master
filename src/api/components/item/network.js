@@ -3,17 +3,13 @@
 const express = require("express");
 const router = express.Router();
 
-// Helper de respuestas global (ruta correcta)
 const response = require("../../../utils/response");
-
-// Controller con la lógica de items
 const controller = require("./controller/controller");
 
 // GET /api/items
 router.get("/", async (req, res) => {
   try {
     const items = await controller.list();
-    // firma: success(req, res, status, data)
     response.success(req, res, 200, items);
   } catch (err) {
     console.error("[GET /api/items] ERROR:", err);
@@ -53,7 +49,23 @@ router.post("/", async (req, res) => {
   }
 });
 
-// PUT /api/items/:id
+// PUT /api/items  (id viene en el body)
+router.put("/", async (req, res) => {
+  try {
+    const item = await controller.upsert(req.body);
+    response.success(req, res, 200, item);
+  } catch (err) {
+    console.error("[PUT /api/items] ERROR:", err);
+    response.error(
+      req,
+      res,
+      400,
+      err.message || "Error actualizando ítem"
+    );
+  }
+});
+
+// PUT /api/items/:id  (soporta también id en la URL)
 router.put("/:id", async (req, res) => {
   try {
     const item = await controller.upsert({
