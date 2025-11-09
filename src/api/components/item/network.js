@@ -1,219 +1,90 @@
-// src/api/components/item/network.js
-const express = require('express');
+// C:\Users\japf2\Desktop\Tesis Cubicaje\Proyecto\proyectoPrincipal\msApiCubicaje-master\src\api\components\item\network.js
+
+const express = require("express");
 const router = express.Router();
-const db = require('../../../store'); // 👈 ESTE
 
-// Wrapper a Promesa usando db.query (callback-style adaptado)
-function q(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.query(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
-    });
-  });
-}
+// Helper de respuestas global (ruta correcta)
+const response = require("../../../utils/response");
 
+// Controller con la lógica de items
+const controller = require("./controller/controller");
 
-/**
- * GET /api/items
- * Lista ítems activos.
- */
-router.get('/', async (req, res) => {
+// GET /api/items
+router.get("/", async (req, res) => {
   try {
-    const rows = await q(
-      `SELECT
-         id_item,
-         id_categoria,
-         nombre,
-         ancho,
-         largo,
-         alto,
-         peso,
-         estado,
-         activo           AS is_active,
-         fecha_eliminacion AS deleted_at,
-         fecha_creacion    AS created_at,
-         fecha_actualizacion AS updated_at
-       FROM items
-       WHERE activo = 1
-       ORDER BY id_item ASC`
-    );
-
-    console.log('[GET /api/items] ->', rows.length, 'registros');
-    res.json({ error: false, status: 200, body: rows });
+    const items = await controller.list();
+    // firma: success(req, res, status, data)
+    response.success(req, res, 200, items);
   } catch (err) {
-    console.log('[GET /api/items] ERROR:', err);
-    res.status(500).json({
-      error: true,
-      status: 500,
-      message: 'Error obteniendo ítems',
-    });
+    console.error("[GET /api/items] ERROR:", err);
+    response.error(req, res, 500, "Error obteniendo ítems");
   }
 });
 
-/**
- * POST /api/items
- * Crea ítem.
- */
-router.post('/', async (req, res) => {
+// GET /api/items/:id
+router.get("/:id", async (req, res) => {
   try {
-    const {
-      id_categoria,
-      nombre,
-      ancho,
-      largo,
-      alto,
-      peso,
-      estado,
-    } = req.body;
-
-    if (!nombre) {
-      return res.status(400).json({
-        error: true,
-        status: 400,
-        message: 'nombre es obligatorio',
-      });
-    }
-
-    const result = await q(
-      `INSERT INTO items
-         (id_categoria, nombre, ancho, largo, alto, peso, estado, activo, fecha_creacion, fecha_actualizacion)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())`,
-      [
-        id_categoria || null,
-        nombre,
-        ancho || 0,
-        largo || 0,
-        alto || 0,
-        peso || 0,
-        estado || 'ACTIVO',
-      ]
-    );
-
-    res.json({
-      error: false,
-      status: 201,
-      body: { id_item: result.insertId },
-    });
+    const item = await controller.get(req.params.id);
+    response.success(req, res, 200, item);
   } catch (err) {
-    console.log('[POST /api/items] ERROR:', err);
-    res.status(400).json({
-      error: true,
-      status: 400,
-      message: 'Error creando ítem',
-    });
+    console.error("[GET /api/items/:id] ERROR:", err);
+    response.error(
+      req,
+      res,
+      404,
+      err.message || "Ítem no encontrado"
+    );
   }
 });
 
-/**
- * PUT /api/items
- * Actualiza ítem usando id en el body (id_item o id).
- * Compatible con tu frontend actual.
- */
-router.put('/', async (req, res) => {
+// POST /api/items
+router.post("/", async (req, res) => {
   try {
-    const id =
-      req.body.id_item ||
-      req.body.id;
-
-    if (!id) {
-      return res.status(400).json({
-        error: true,
-        status: 400,
-        message: 'ID de ítem requerido',
-      });
-    }
-
-    const {
-      id_categoria,
-      nombre,
-      ancho,
-      largo,
-      alto,
-      peso,
-      estado,
-      is_active,
-      activo,
-    } = req.body;
-
-    const fields = [];
-    const params = [];
-
-    if (id_categoria !== undefined) { fields.push('id_categoria = ?'); params.push(id_categoria); }
-    if (nombre !== undefined) { fields.push('nombre = ?'); params.push(nombre); }
-    if (ancho !== undefined) { fields.push('ancho = ?'); params.push(ancho); }
-    if (largo !== undefined) { fields.push('largo = ?'); params.push(largo); }
-    if (alto !== undefined) { fields.push('alto = ?'); params.push(alto); }
-    if (peso !== undefined) { fields.push('peso = ?'); params.push(peso); }
-    if (estado !== undefined) { fields.push('estado = ?'); params.push(estado); }
-
-    const activeValue =
-      typeof is_active === 'number' || typeof is_active === 'boolean'
-        ? (is_active ? 1 : 0)
-        : typeof activo === 'number' || typeof activo === 'boolean'
-        ? (activo ? 1 : 0)
-        : undefined;
-
-    if (activeValue !== undefined) {
-      fields.push('activo = ?');
-      params.push(activeValue);
-    }
-
-    fields.push('fecha_actualizacion = NOW()');
-
-    const sql = `
-      UPDATE items
-      SET ${fields.join(', ')}
-      WHERE id_item = ?
-    `;
-    params.push(id);
-
-    await q(sql, params);
-
-    res.json({
-      error: false,
-      status: 200,
-      body: { id_item: id },
-    });
+    const item = await controller.upsert(req.body);
+    response.success(req, res, 201, item);
   } catch (err) {
-    console.log('[PUT /api/items] ERROR:', err);
-    res.status(400).json({
-      error: true,
-      status: 400,
-      message: 'Error actualizando ítem',
-    });
+    console.error("[POST /api/items] ERROR:", err);
+    response.error(
+      req,
+      res,
+      400,
+      err.message || "Error creando ítem"
+    );
   }
 });
 
-/**
- * DELETE /api/items/:id
- * Soft delete.
- */
-router.delete('/:id', async (req, res) => {
+// PUT /api/items/:id
+router.put("/:id", async (req, res) => {
   try {
-    const { id } = req.params;
-
-    await q(
-      `UPDATE items
-       SET activo = 0,
-           fecha_eliminacion = NOW(),
-           fecha_actualizacion = NOW()
-       WHERE id_item = ?`,
-      [id]
-    );
-
-    res.json({
-      error: false,
-      status: 200,
-      body: { id_item: id },
+    const item = await controller.upsert({
+      ...req.body,
+      id: req.params.id,
     });
+    response.success(req, res, 200, item);
   } catch (err) {
-    console.log('[DELETE /api/items/:id] ERROR:', err);
-    res.status(400).json({
-      error: true,
-      status: 400,
-      message: 'Error eliminando ítem',
-    });
+    console.error("[PUT /api/items/:id] ERROR:", err);
+    response.error(
+      req,
+      res,
+      400,
+      err.message || "Error actualizando ítem"
+    );
+  }
+});
+
+// DELETE /api/items/:id
+router.delete("/:id", async (req, res) => {
+  try {
+    const result = await controller.remove(req.params.id);
+    response.success(req, res, 200, result);
+  } catch (err) {
+    console.error("[DELETE /api/items/:id] ERROR:", err);
+    response.error(
+      req,
+      res,
+      400,
+      err.message || "Error eliminando ítem"
+    );
   }
 });
 

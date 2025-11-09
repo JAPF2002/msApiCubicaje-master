@@ -1,12 +1,7 @@
-// MSAPICUBICAJE-MASTER/src/api/components/item/controller/index.js
+// msApiCubicaje-master/src/api/components/item/index.js
 
-const config = require('../../../../../config');
-const createRemoteDB = require('../../../../store/remote');
-const controllerFactory = require('./controller');
+const router = require('./network');
 
-const store = createRemoteDB(
-  config.mysqlService.host,
-  config.mysqlService.port
-);
-
-module.exports = controllerFactory(store);
+module.exports = (server, config) => {
+  server.use('/api/items', router);
+};
