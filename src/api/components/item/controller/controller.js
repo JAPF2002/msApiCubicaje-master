@@ -1,208 +1,160 @@
-// C:\Users\japf2\Desktop\Tesis Cubicaje\Proyecto\proyectoPrincipal\msApiCubicaje-master\src\api\components\item\controller\controller.js
+// msApiCubicaje-master/src/api/components/item/controller/controller.js
 
-const store = require("../../../../store");
+const store = require('../../../../store');
 
-const TABLE_ITEMS = "items";
-const TABLE_BODEGA_ITEMS = "bodega_items";
-
-/* ------------ Helpers ------------ */
+const TABLE_ITEMS = 'items';
+const TABLE_BI = 'bodega_items';
 
 function num(v) {
-  const n = parseFloat(String(v ?? "").replace(",", "."));
+  const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
 
 function clampInt(v, min = 1) {
-  const n = parseInt(v ?? "0", 10);
-  return Math.max(Number.isFinite(n) ? n : 0, min);
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n) || n < min) return min;
+  return n;
 }
 
-function mapItemRow(row) {
+function buildItemRow(baseItem, rel) {
   return {
-    id: row.id_item ?? row.id,
-    nombre: row.nombre,
-    ancho: num(row.ancho),
-    alto: num(row.alto),
-    largo: num(row.largo),
-    peso: num(row.peso),
-    cantidad: clampInt(row.cantidad ?? row.qty ?? 1, 1),
-    bodegaId:
-      row.id_bodega ?? row.bodega_id ?? row.bodegaId ?? null,
-    id_categoria: row.id_categoria ?? row.categoriaId ?? null,
-    clase: row.clase || null,
+    id: baseItem.id_item || baseItem.id,
+    nombre: baseItem.nombre,
+    ancho: num(baseItem.ancho),
+    alto: num(baseItem.alto),
+    largo: num(baseItem.largo),
+    peso: num(baseItem.peso),
+    cantidad: rel ? clampInt(rel.qty || rel.cantidad || 1, 1) : 1,
+    bodegaId: rel ? (rel.id_bodega || rel.bodegaId || null) : null,
+    id_categoria: baseItem.id_categoria || null,
+    clase: baseItem.clase || null,
   };
 }
 
-/* ------------ LIST: GET /api/items ------------ */
-
+/** GET /api/items */
 async function list() {
-  // usamos las abstracciones del store como en el resto del proyecto
-  const itemsRows = (await store.list(TABLE_ITEMS)) || [];
-  const relRows =
-    (await store.list(TABLE_BODEGA_ITEMS)) || [];
+  try {
+    const items = (await store.list(TABLE_ITEMS)) || [];
+    let bi = [];
 
-  const relByItem = new Map();
-  for (const r of relRows) {
-    if (!r) continue;
-    relByItem.set(r.id_item, r);
-  }
-
-  const activos = itemsRows.filter(
-    (r) =>
-      r &&
-      (r.activo === undefined ||
-        r.activo === null ||
-        r.activo === 1)
-  );
-
-  const merged = activos.map((r) => {
-    const rel = relByItem.get(r.id_item);
-    return mapItemRow({
-      ...r,
-      id_bodega: rel?.id_bodega,
-      cantidad: rel?.qty ?? r.cantidad,
-    });
-  });
-
-  console.log(
-    `[ITEM LIST] items=${itemsRows.length}, bodega_items=${relRows.length}, activos=${merged.length}`
-  );
-
-  return merged;
-}
-
-/* ------------ GET: /api/items/:id ------------ */
-
-async function get(id) {
-  const itemRow = await store.get(TABLE_ITEMS, id);
-
-  if (!itemRow) {
-    throw new Error("Ítem no encontrado");
-  }
-
-  const relRows =
-    (await store.list(TABLE_BODEGA_ITEMS)) || [];
-  const rel = relRows.find(
-    (r) => r.id_item === itemRow.id_item
-  );
-
-  return mapItemRow({
-    ...itemRow,
-    id_bodega: rel?.id_bodega,
-    cantidad: rel?.qty ?? itemRow.cantidad,
-  });
-}
-
-/* ------------ UPSERT: POST/PUT /api/items ------------ */
-
-async function upsert(data) {
-  console.log("[ITEM UPSERT BODY]", data);
-
-  const creating = !data.id && !data.id_item;
-
-  if (!data.nombre) {
-    throw new Error("El nombre del ítem es requerido");
-  }
-
-  let itemId = data.id_item || data.id || null;
-
-  const item = {
-    nombre: data.nombre,
-    id_categoria: data.id_categoria || data.categoriaId || null,
-    ancho: num(data.ancho),
-    alto: num(data.alto),
-    largo: num(data.largo),
-    peso: num(data.peso),
-    activo: 1,
-  };
-
-  if (creating) {
-    const result = await store.insert(TABLE_ITEMS, item);
-    itemId = result.insertId || result.id || itemId;
-  } else {
-    if (!itemId) {
-      throw new Error("ID requerido para actualizar ítem");
+    try {
+      bi = (await store.list(TABLE_BI)) || [];
+    } catch (e) {
+      console.warn('[ITEM LIST] advertencia al leer bodega_items:', e.message);
+      bi = [];
     }
-    await store.update(
-      TABLE_ITEMS,
-      { id_item: itemId },
-      item
+
+    const byItem = new Map();
+    for (const rel of bi) {
+      const itemId = rel.id_item || rel.itemId;
+      if (!itemId) continue;
+      if (!byItem.has(itemId)) byItem.set(itemId, []);
+      byItem.get(itemId).push(rel);
+    }
+
+    const result = [];
+    for (const it of items) {
+      if (it.activo !== undefined && Number(it.activo) === 0) continue;
+
+      const itemId = it.id_item || it.id;
+      const rels = byItem.get(itemId) || [];
+
+      if (!rels.length) {
+        result.push(buildItemRow(it, null));
+      } else {
+        for (const rel of rels) {
+          result.push(buildItemRow(it, rel));
+        }
+      }
+    }
+
+    console.log(
+      `[ITEM LIST] items=${items.length}, bodega_items=${bi.length}, activos=${result.length}`
     );
+
+    return result;
+  } catch (err) {
+    console.error('[ITEM LIST] ERROR:', err);
+    throw new Error('Error obteniendo ítems');
   }
+}
 
-  const bodegaId = data.id_bodega || data.bodegaId || null;
-  const cantidad = clampInt(
-    data.cantidad ?? data.qty ?? 1,
-    1
-  );
+/** GET /api/items/:id */
+async function get(id) {
+  const all = await list();
+  const it = all.find((x) => String(x.id) === String(id));
+  if (!it) throw new Error('Ítem no encontrado');
+  return it;
+}
 
-  if (bodegaId && itemId) {
-    const relRows =
-      (await store.list(TABLE_BODEGA_ITEMS)) || [];
-    const existing = relRows.find(
-      (r) =>
-        r.id_bodega === bodegaId &&
-        r.id_item === itemId
-    );
+/** POST/PUT /api/items */
+async function upsert(body) {
+  try {
+    const id = body.id_item || body.id || null;
 
-    if (existing) {
-      await store.update(
-        TABLE_BODEGA_ITEMS,
-        {
-          id_bodega: bodegaId,
-          id_item: itemId,
-        },
-        { qty: cantidad }
-      );
+    const dataItem = {
+      id_item: id || undefined,
+      nombre: body.nombre,
+      id_categoria: body.id_categoria || body.categoriaId || null,
+      ancho: num(body.ancho),
+      alto: num(body.alto),
+      largo: num(body.largo),
+      peso: num(body.peso),
+      activo: body.activo !== undefined ? Number(body.activo) : 1,
+    };
+
+    Object.keys(dataItem).forEach((k) => {
+      if (dataItem[k] === undefined) delete dataItem[k];
+    });
+
+    if (!dataItem.nombre) throw new Error('Nombre requerido');
+
+    let itemId = id;
+
+    if (!itemId) {
+      const insertRes = await store.insert(TABLE_ITEMS, dataItem);
+      itemId = insertRes.insertId || dataItem.id_item || insertRes.id;
+      if (!itemId) throw new Error('No se pudo obtener el id del ítem insertado');
     } else {
-      await store.insert(TABLE_BODEGA_ITEMS, {
+      dataItem.id_item = itemId;
+      await store.update(TABLE_ITEMS, dataItem);
+    }
+
+    const bodegaId = body.id_bodega || body.bodegaId || null;
+    const qtyRaw = body.cantidad !== undefined ? body.cantidad : body.qty;
+
+    if (store.query) {
+      await store.query('DELETE FROM bodega_items WHERE id_item = ?', [itemId]);
+    }
+
+    if (bodegaId && qtyRaw !== undefined) {
+      const qty = clampInt(qtyRaw, 1);
+      await store.insert(TABLE_BI, {
         id_bodega: bodegaId,
         id_item: itemId,
-        qty: cantidad,
+        qty,
       });
     }
-  }
 
-  if (!itemId) {
-    console.log(
-      "[ITEM UPSERT] WARNING: itemId indefinido tras guardar"
-    );
-    return {
-      id: null,
-      ...item,
-      bodegaId,
-      cantidad,
-    };
-  }
-
-  try {
-    return await get(itemId);
-  } catch (e) {
-    console.log(
-      "[ITEM UPSERT] WARN no se pudo obtener ítem recién guardado:",
-      e.message
-    );
-    return {
-      id: itemId,
-      ...item,
-      bodegaId,
-      cantidad,
-    };
+    return { id: itemId };
+  } catch (err) {
+    console.error('[ITEM UPSERT] ERROR:', err);
+    throw new Error(err.message || 'Error guardando ítem');
   }
 }
 
-/* ------------ DELETE: /api/items/:id ------------ */
-
+/** DELETE /api/items/:id */
 async function remove(id) {
-  await store.update(
-    TABLE_ITEMS,
-    { id_item: id },
-    {
-      activo: 0,
-      fecha_eliminacion: new Date(),
+  try {
+    if (store.query) {
+      await store.query('DELETE FROM bodega_items WHERE id_item = ?', [id]);
     }
-  );
-  return { message: "Ítem eliminado" };
+    await store.remove(TABLE_ITEMS, id);
+    return { id };
+  } catch (err) {
+    console.error('[ITEM DELETE] ERROR:', err);
+    throw new Error('Error eliminando ítem');
+  }
 }
 
 module.exports = {
