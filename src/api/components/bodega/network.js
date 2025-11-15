@@ -1,7 +1,7 @@
-// src/api/components/bodega/network.js
+// msApiCubicaje-master/src/api/components/bodega/network.js
 const express = require('express');
 const router = express.Router();
-const db = require('../../../store'); // 👈 ESTE
+const db = require('../../../store'); // 👈 tu módulo original
 
 // Wrapper a Promesa usando db.query (callback-style adaptado)
 function q(sql, params = []) {
@@ -13,29 +13,189 @@ function q(sql, params = []) {
   });
 }
 
+/* =========================================================================
+ *  HELPERS PARA LAYOUT + UBICACIONES
+ * ========================================================================= */
+
+// Guarda / actualiza el layout de una bodega y regenera ubicaciones
+async function upsertLayoutForBodega(id_bodega, layout) {
+  if (!layout || !layout.mapa_json) return;
+
+  const anchoLayout = Number(layout.ancho) || 0;
+  const largoLayout = Number(layout.largo) || 0;
+
+  const mapaJsonString =
+    typeof layout.mapa_json === 'string'
+      ? layout.mapa_json
+      : JSON.stringify(layout.mapa_json);
+
+  // ⚠️ Idealmente en bodega_layouts deberías tener UNIQUE(id_bodega)
+  const sql = `
+    INSERT INTO bodega_layouts
+      (id_bodega, ancho, largo, mapa_json, fecha_creacion, fecha_actualizacion)
+    VALUES (?, ?, ?, ?, NOW(), NOW())
+    ON DUPLICATE KEY UPDATE
+      ancho = VALUES(ancho),
+      largo = VALUES(largo),
+      mapa_json = VALUES(mapa_json),
+      fecha_actualizacion = NOW()
+  `;
+
+  await q(sql, [id_bodega, anchoLayout, largoLayout, mapaJsonString]);
+
+  // Después de guardar el layout, regeneramos las ubicaciones disponibles
+  await regenUbicacionesDesdeLayout(id_bodega, {
+    ancho: anchoLayout,
+    largo: largoLayout,
+    mapa_json: layout.mapa_json,
+  });
+}
+
+// Crea bodega_ubicaciones a partir de mapa_json (solo celdas "D")
+async function regenUbicacionesDesdeLayout(id_bodega, layout) {
+  const ancho = Number(layout.ancho) || 0;
+  const largo = Number(layout.largo) || 0;
+
+  if (!ancho || !largo) return;
+
+  let mapa = layout.mapa_json;
+  if (typeof mapa === 'string') {
+    try {
+      mapa = JSON.parse(mapa);
+    } catch (e) {
+      console.error('[regenUbicacionesDesdeLayout] error parse JSON', e);
+      return;
+    }
+  }
+
+  // 1) Borrar todas las ubicaciones previas de esa bodega
+  await q('DELETE FROM bodega_ubicaciones WHERE id_bodega = ?', [id_bodega]);
+
+  const totalCeldas = ancho * largo;
+
+  // 2) Recorrer todas las celdas del grid y crear ubicaciones solo para "D"
+  for (let index = 0; index < totalCeldas; index++) {
+    const estado = mapa[index] ?? mapa[String(index)] ?? 'D';
+
+    // Solo creamos ubicación si la celda es DISPONIBLE
+    if (estado !== 'D') continue;
+
+    const x = index % ancho;
+    const y = Math.floor(index / ancho);
+
+    await q(
+      `
+      INSERT INTO bodega_ubicaciones
+        (id_bodega, nombre, descripcion, pos_x, pos_y, pos_z,
+         ancho, largo, alto, activo, fecha_creacion, fecha_actualizacion)
+      VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())
+    `,
+      [
+        id_bodega,
+        `C-${x}-${y}`, // nombre
+        `Celda (${x},${y})`,
+        x, // pos_x
+        y, // pos_y
+        0, // pos_z
+        1, // ancho celda
+        1, // largo celda
+        1, // alto celda
+      ]
+    );
+  }
+}
+
+/* =========================================================================
+ *  HELPER PARA ASIGNAR ITEMS SOLO A UBICACIONES LIBRES
+ * ========================================================================= */
+
+async function asignarItemAuto(id_bodega, id_item) {
+  // 1) Buscar una ubicación activa SIN items
+  const libres = await q(
+    `
+    SELECT u.id_ubicacion
+    FROM bodega_ubicaciones u
+    LEFT JOIN bodega_ubicacion_items ui
+      ON ui.id_ubicacion = u.id_ubicacion
+    WHERE u.id_bodega = ?
+      AND u.activo = 1
+      AND ui.id_ubicacion IS NULL
+    ORDER BY u.id_ubicacion ASC
+    LIMIT 1
+  `,
+    [id_bodega]
+  );
+
+  if (!libres.length) {
+    const err = new Error('NO_FREE_LOCATION');
+    err.code = 'NO_FREE_LOCATION';
+    throw err;
+  }
+
+  const id_ubicacion = libres[0].id_ubicacion;
+
+  // 2) Registrar el item en esa ubicación (1 unidad por defecto)
+  await q(
+    `
+    INSERT INTO bodega_ubicacion_items
+      (id_ubicacion, id_item, qty, movible, fecha_creacion, fecha_actualizacion)
+    VALUES (?, ?, 1, 1, NOW(), NOW())
+    ON DUPLICATE KEY UPDATE
+      qty = qty + 1,
+      fecha_actualizacion = NOW()
+  `,
+    [id_ubicacion, id_item]
+  );
+
+  // 3) (Opcional) mantener agregado por bodega en bodega_items
+  await q(
+    `
+    INSERT INTO bodega_items
+      (id_bodega, id_item, qty, fecha_creacion, fecha_actualizacion)
+    VALUES (?, ?, 1, NOW(), NOW())
+    ON DUPLICATE KEY UPDATE
+      qty = qty + 1,
+      fecha_actualizacion = NOW()
+  `,
+    [id_bodega, id_item]
+  );
+
+  return { id_ubicacion };
+}
+
+/* =========================================================================
+ *  ENDPOINTS BÁSICOS DE BODEGAS
+ * ========================================================================= */
 
 /**
  * GET /api/bodegas
- * Lista todas las bodegas.
+ * Lista todas las bodegas (incluye layout si existe).
  */
 router.get('/', async (req, res) => {
   try {
     const rows = await q(
       `SELECT
-         id_bodega,
-         nombre,
-         ciudad,
-         direccion,
-         ancho,
-         largo,
-         alto,
-         id_usuario,
-         activo           AS is_active,
-         fecha_eliminacion AS deleted_at,
-         fecha_creacion    AS created_at,
-         fecha_actualizacion AS updated_at
-       FROM bodegas
-       ORDER BY id_bodega ASC`
+         b.id_bodega,
+         b.nombre,
+         b.ciudad,
+         b.direccion,
+         b.ancho,
+         b.largo,
+         b.alto,
+         b.id_usuario,
+         b.activo             AS is_active,
+         b.fecha_eliminacion  AS deleted_at,
+         b.fecha_creacion     AS created_at,
+         b.fecha_actualizacion AS updated_at,
+         l.ancho              AS layout_ancho,
+         l.largo              AS layout_largo,
+         l.mapa_json          AS layout_mapa_json
+       FROM bodegas b
+       LEFT JOIN bodega_layouts l
+         ON l.id_bodega = b.id_bodega
+       WHERE b.fecha_eliminacion IS NULL
+       ORDER BY b.id_bodega ASC`
     );
 
     console.log('[GET /api/bodegas] ->', rows.length, 'registros');
@@ -51,8 +211,61 @@ router.get('/', async (req, res) => {
 });
 
 /**
+ * GET /api/bodegas/:id
+ * Obtener una bodega específica (incluye layout si existe).
+ */
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const rows = await q(
+      `SELECT
+         b.id_bodega,
+         b.nombre,
+         b.ciudad,
+         b.direccion,
+         b.ancho,
+         b.largo,
+         b.alto,
+         b.id_usuario,
+         b.activo             AS is_active,
+         b.fecha_eliminacion  AS deleted_at,
+         b.fecha_creacion     AS created_at,
+         b.fecha_actualizacion AS updated_at,
+         l.ancho              AS layout_ancho,
+         l.largo              AS layout_largo,
+         l.mapa_json          AS layout_mapa_json
+       FROM bodegas b
+       LEFT JOIN bodega_layouts l
+         ON l.id_bodega = b.id_bodega
+       WHERE b.id_bodega = ?
+         AND b.fecha_eliminacion IS NULL
+       LIMIT 1`,
+      [id]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        error: true,
+        status: 404,
+        message: 'Bodega no encontrada',
+      });
+    }
+
+    res.json({ error: false, status: 200, body: rows[0] });
+  } catch (err) {
+    console.log('[GET /api/bodegas/:id] ERROR:', err);
+    res.status(500).json({
+      error: true,
+      status: 500,
+      message: 'Error obteniendo bodega',
+    });
+  }
+});
+
+/**
  * POST /api/bodegas
- * Crea una nueva bodega.
+ * Crea una nueva bodega (y opcionalmente su layout).
  */
 router.post('/', async (req, res) => {
   try {
@@ -65,7 +278,8 @@ router.post('/', async (req, res) => {
       alto,
       id_usuario,
       activo = 1,
-    } = req.body;
+      layout, // 👈 viene del frontend (layout: { ancho, largo, mapa_json })
+    } = req.body || {};
 
     if (!nombre || !direccion) {
       return res.status(400).json({
@@ -91,16 +305,21 @@ router.post('/', async (req, res) => {
       ]
     );
 
-    res.json({
+    const newId = result.insertId;
+
+    // Guardar layout + generar ubicaciones (si viene)
+    await upsertLayoutForBodega(newId, layout);
+
+    res.status(201).json({
       error: false,
       status: 201,
-      body: { id_bodega: result.insertId },
+      body: { id_bodega: newId },
     });
   } catch (err) {
     console.log('[POST /api/bodegas] ERROR:', err);
-    res.status(400).json({
+    res.status(500).json({
       error: true,
-      status: 400,
+      status: 500,
       message: 'Error creando bodega',
     });
   }
@@ -108,7 +327,7 @@ router.post('/', async (req, res) => {
 
 /**
  * PUT /api/bodegas/:id
- * Actualiza bodega existente.
+ * Actualiza bodega existente (y opcionalmente su layout).
  */
 router.put('/:id', async (req, res) => {
   try {
@@ -123,7 +342,8 @@ router.put('/:id', async (req, res) => {
       id_usuario,
       is_active,
       activo,
-    } = req.body;
+      layout, // 👈 puede venir actualizado desde el frontend
+    } = req.body || {};
 
     const fields = [];
     const params = [];
@@ -159,6 +379,9 @@ router.put('/:id', async (req, res) => {
 
     await q(sql, params);
 
+    // Actualizar/crear layout + regenerar ubicaciones (si viene)
+    await upsertLayoutForBodega(Number(id), layout);
+
     res.json({
       error: false,
       status: 200,
@@ -166,9 +389,9 @@ router.put('/:id', async (req, res) => {
     });
   } catch (err) {
     console.log('[PUT /api/bodegas/:id] ERROR:', err);
-    res.status(400).json({
+    res.status(500).json({
       error: true,
-      status: 400,
+      status: 500,
       message: 'Error actualizando bodega',
     });
   }
@@ -198,10 +421,58 @@ router.delete('/:id', async (req, res) => {
     });
   } catch (err) {
     console.log('[DELETE /api/bodegas/:id] ERROR:', err);
-    res.status(400).json({
+    res.status(500).json({
+      error: true,
+      status: 500,
+      message: 'Error eliminando bodega',
+    });
+  }
+});
+
+/* =========================================================================
+ *  ENDPOINT PARA ASIGNAR ITEMS AUTOMÁTICAMENTE
+ * ========================================================================= */
+
+/**
+ * POST /api/bodegas/:id/items/auto
+ * Body: { id_item: number }
+ * Asigna el item a una ubicación libre dentro de la bodega.
+ */
+router.post('/:id/items/auto', async (req, res) => {
+  const id_bodega = Number(req.params.id);
+  const { id_item } = req.body || {};
+
+  if (!id_bodega || !id_item) {
+    return res.status(400).json({
       error: true,
       status: 400,
-      message: 'Error eliminando bodega',
+      message: 'id_bodega o id_item faltante',
+    });
+  }
+
+  try {
+    const result = await asignarItemAuto(id_bodega, Number(id_item));
+
+    res.status(201).json({
+      error: false,
+      status: 201,
+      body: result, // { id_ubicacion }
+    });
+  } catch (err) {
+    console.log('[POST /api/bodegas/:id/items/auto] ERROR:', err);
+
+    if (err.code === 'NO_FREE_LOCATION') {
+      return res.status(409).json({
+        error: true,
+        status: 409,
+        message: 'No hay ubicaciones disponibles en esta bodega',
+      });
+    }
+
+    res.status(500).json({
+      error: true,
+      status: 500,
+      message: 'Error asignando item a ubicación',
     });
   }
 });
