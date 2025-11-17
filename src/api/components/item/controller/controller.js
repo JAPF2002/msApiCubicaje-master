@@ -1,257 +1,288 @@
 // msApiCubicaje-master/src/api/components/item/controller/controller.js
 
-// OJO: desde esta carpeta hay que subir 4 niveles hasta src/store
-const store = require('../../../../store');
+// Controlador de Items: encapsula la lógica de negocio de items + bodega_items
+const db = require('../../../../store');
 
 const TABLE_ITEMS = 'items';
 const TABLE_BODEGA_ITEMS = 'bodega_items';
 
+// Wrapper de Promesa sobre db.query (callback-style)
+function q(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.query(sql, params, (err, rows) => {
+      if (err) return reject(err);
+      resolve(rows);
+    });
+  });
+}
+
+// Normaliza un registro de items + un posible registro de bodega_items
+function buildItemRecord(itemRow, linkRow) {
+  const id = Number(itemRow.id_item);
+  const base = {
+    ...itemRow,
+    id,
+    id_item: id,
+    id_categoria:
+      itemRow.id_categoria != null ? Number(itemRow.id_categoria) : null,
+    ancho: Number(itemRow.ancho || 0),
+    largo: Number(itemRow.largo || 0),
+    alto: Number(itemRow.alto || 0),
+    peso: itemRow.peso != null ? Number(itemRow.peso) : null,
+  };
+
+  if (!linkRow) {
+    // Ítem sin relación en bodega_items
+    return {
+      ...base,
+      bodegaId: null,
+      cantidad: 0,
+    };
+  }
+
+  return {
+    ...base,
+    bodegaId: Number(linkRow.id_bodega),
+    cantidad: Number(linkRow.qty || 0),
+  };
+}
+
 /**
  * Devuelve lista normalizada de ítems combinando items + bodega_items.
+ * Cada combinación (item, bodega) se expone como un registro.
  */
 async function list() {
-  const items = await store.query(TABLE_ITEMS, { activo: 1 }).catch(() => []);
-  const rels = await store.query(TABLE_BODEGA_ITEMS).catch(() => []);
+  // Solo items activos
+  const items = await q(
+    `SELECT * FROM ${TABLE_ITEMS} WHERE activo = 1`
+  );
 
+  const rels = await q(
+    `SELECT * FROM ${TABLE_BODEGA_ITEMS}`
+  );
+
+  // Agrupamos relaciones por id_item
   const byItem = new Map();
-  if (Array.isArray(rels)) {
-    for (const r of rels) {
-      const key = Number(r.id_item);
-      if (!byItem.has(key)) byItem.set(key, []);
-      byItem.get(key).push(r);
-    }
+  for (const r of rels) {
+    const key = Number(r.id_item);
+    if (!byItem.has(key)) byItem.set(key, []);
+    byItem.get(key).push(r);
   }
 
   const result = [];
+  for (const it of items) {
+    const id = Number(it.id_item);
+    const links = byItem.get(id) || [];
 
-  if (Array.isArray(items)) {
-    for (const it of items) {
-      const id = Number(it.id_item || it.id);
-      const links = byItem.get(id) || [];
-
-      const totalQtyFromLinks = links.reduce(
-        (acc, r) => acc + Number(r.qty || 0),
-        0
-      );
-
-      const totalQty =
-        totalQtyFromLinks > 0
-          ? totalQtyFromLinks
-          : Number(it.cantidad || 0) || 1;
-
-      let bodegaId = null;
-      if (links.length === 1) {
-        bodegaId = Number(links[0].id_bodega);
+    if (!links.length) {
+      // Sin stock asociado en ninguna bodega
+      result.push(buildItemRecord(it, null));
+    } else {
+      for (const link of links) {
+        result.push(buildItemRecord(it, link));
       }
-
-      result.push({
-        id,
-        nombre: it.nombre,
-        ancho: Number(it.ancho || 0),
-        alto: Number(it.alto || 0),
-        largo: Number(it.largo || 0),
-        peso: Number(it.peso || 0),
-        cantidad: totalQty,
-        bodegaId,
-        id_categoria: Number(it.id_categoria || 0) || null,
-        clase: it.clase || null,
-      });
     }
   }
-
-  console.log(
-    `[ITEM LIST] items=${result.length}, bodega_items=${
-      Array.isArray(rels) ? rels.length : 0
-    }, activos=${Array.isArray(items) ? items.length : 0}`
-  );
 
   return result;
 }
 
 /**
- * Crear / actualizar ítem.
+ * Obtiene un ítem por ID (solo el registro de items).
  */
-async function upsert(data, creating) {
-  const id = Number(data.id_item || data.id) || null;
+async function get(id) {
+  const rows = await q(
+    `SELECT * FROM ${TABLE_ITEMS} WHERE id_item = ?`,
+    [id]
+  );
+  if (!rows || !rows.length) {
+    throw new Error('Ítem no encontrado');
+  }
+  return rows[0];
+}
+
+/**
+ * Crea o actualiza un ítem.
+ * Si viene bodegaId + cantidad, también upsertea en bodega_items.
+ */
+async function upsert(data = {}, creating = false) {
   const nombre = (data.nombre || '').trim();
+  const idCategoria = data.id_categoria ?? data.categoriaId ?? null;
+  const ancho = Number(data.ancho || 0);
+  const largo = Number(data.largo || 0);
+  const alto = Number(data.alto || 0);
+  const peso = data.peso != null ? Number(data.peso) : null;
+  const estado = data.estado || null;
 
-  if (!nombre) throw new Error('Nombre requerido');
+  const bodegaId = data.bodegaId ?? data.id_bodega ?? null;
+  const cantidad = Number(data.cantidad || 0);
 
-  const baseData = {
-    nombre,
-    ancho: Number(data.ancho || 0),
-    alto: Number(data.alto || 0),
-    largo: Number(data.largo || 0),
-    peso: Number(data.peso || 0),
-    id_categoria: data.id_categoria || null,
-    activo: 1,
-  };
+  if (!nombre) {
+    throw new Error('Campo requerido faltante: nombre');
+  }
 
-  // CREAR
+  let itemId = data.id_item || data.id || null;
+
   if (creating) {
-    const inserted = await store.insert(TABLE_ITEMS, baseData);
-    const newId = inserted.insertId || inserted.id;
-    const idItem = newId;
+    const insertRes = await q(
+      `INSERT INTO ${TABLE_ITEMS}
+      (nombre, id_categoria, ancho, largo, alto, peso, estado, activo)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+      [nombre, idCategoria, ancho, largo, alto, peso, estado]
+    );
 
-    const idBodega = data.id_bodega || data.bodegaId || null;
-    const cantidad = Number(data.cantidad || 0);
-
-    if (idItem && idBodega && cantidad > 0) {
-      await store.insert(TABLE_BODEGA_ITEMS, {
-        id_bodega: idBodega,
-        id_item: idItem,
-        qty: cantidad,
-      });
-    }
-
-    return { id: idItem };
-  }
-
-  // ACTUALIZAR
-  if (!id) throw new Error('ID requerido');
-
-  const fields = {};
-  for (const k of ['nombre', 'ancho', 'alto', 'largo', 'peso', 'id_categoria']) {
-    if (data[k] !== undefined && data[k] !== null && data[k] !== '') {
-      fields[k] = baseData[k];
-    }
-  }
-
-  if (Object.keys(fields).length === 0) {
-    throw new Error('update(): no hay campos para actualizar.');
-  }
-
-  await store.update(TABLE_ITEMS, { id_item: id }, fields);
-
-  // Actualizar relación en bodega_items si viene info
-  if (data.id_bodega || data.bodegaId || data.cantidad) {
-    const idBodega = data.id_bodega || data.bodegaId || null;
-    const cantidad = Number(data.cantidad || 0);
-
-    if (idBodega && cantidad > 0) {
-      const rows = await store.query(TABLE_BODEGA_ITEMS, {
-        id_bodega: idBodega,
-        id_item: id,
-      });
-
-      if (Array.isArray(rows) && rows.length) {
-        await store.update(
-          TABLE_BODEGA_ITEMS,
-          { id_bodega: idBodega, id_item: id },
-          { qty: cantidad }
-        );
-      } else {
-        await store.insert(TABLE_BODEGA_ITEMS, {
-          id_bodega: idBodega,
-          id_item: id,
-          qty: cantidad,
-        });
-      }
-    }
-  }
-
-  return { id };
-}
-
-/**
- * Eliminar ítem.
- */
-async function remove(id) {
-  const nId = Number(id || 0);
-  if (!nId) throw new Error('ID requerido');
-
-  await store.remove(TABLE_BODEGA_ITEMS, { id_item: nId });
-  await store.remove(TABLE_ITEMS, { id_item: nId });
-
-  return true;
-}
-
-/**
- * Mover cantidad parcial entre bodegas.
- */
-async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
-  const itemId = Number(id || 0);
-  const fromId = fromBodegaId ? Number(fromBodegaId) : null;
-  const toId = Number(toBodegaId || 0);
-  const qty = Number(cantidad || 0);
-
-  if (!itemId) throw new Error('ID de ítem inválido');
-  if (!toId) throw new Error('Bodega destino requerida');
-  if (!qty || qty <= 0) throw new Error('Cantidad debe ser mayor a 0');
-
-  const rels = await store
-    .query(TABLE_BODEGA_ITEMS, { id_item: itemId })
-    .catch(() => []);
-
-  const list = Array.isArray(rels) ? rels : [];
-  if (!list.length) {
-    throw new Error('El ítem no tiene cantidades asociadas a bodegas.');
-  }
-
-  let fromRow = null;
-  if (fromId) {
-    fromRow = list.find((r) => Number(r.id_bodega) === fromId);
-    if (!fromRow) {
-      throw new Error('No hay stock en la bodega origen seleccionada.');
-    }
+    itemId = insertRes.insertId;
   } else {
-    if (list.length === 1) {
-      fromRow = list[0];
+    if (!itemId) {
+      throw new Error('ID requerido para actualizar');
+    }
+
+    await q(
+      `UPDATE ${TABLE_ITEMS}
+       SET nombre = ?, id_categoria = ?, ancho = ?, largo = ?, alto = ?, peso = ?, estado = ?
+       WHERE id_item = ?`,
+      [nombre, idCategoria, ancho, largo, alto, peso, estado, itemId]
+    );
+  }
+
+  // Si viene bodegaId, manejamos el stock en bodega_items
+  if (bodegaId != null) {
+    const existing = await q(
+      `SELECT * FROM ${TABLE_BODEGA_ITEMS}
+       WHERE id_bodega = ? AND id_item = ?`,
+      [bodegaId, itemId]
+    );
+
+    if (!existing.length) {
+      if (cantidad > 0) {
+        await q(
+          `INSERT INTO ${TABLE_BODEGA_ITEMS} (id_bodega, id_item, qty)
+           VALUES (?, ?, ?)`,
+          [bodegaId, itemId, cantidad]
+        );
+      }
     } else {
-      throw new Error(
-        'Se requiere bodega origen (existen múltiples bodegas con este ítem).'
+      // Ya existe relación, actualizamos qty (puede ser 0)
+      await q(
+        `UPDATE ${TABLE_BODEGA_ITEMS}
+         SET qty = ?
+         WHERE id_bodega = ? AND id_item = ?`,
+        [cantidad, bodegaId, itemId]
       );
     }
   }
 
-  const fromQty = Number(fromRow.qty || 0);
-  if (qty > fromQty) {
-    throw new Error(
-      `Cantidad a mover (${qty}) es mayor al stock en origen (${fromQty}).`
-    );
+  return { id: itemId };
+}
+
+/**
+ * Elimina un ítem y todas sus relaciones en bodega_items.
+ */
+async function remove(id) {
+  const itemId = Number(id);
+  if (!itemId) {
+    throw new Error('ID inválido');
   }
 
-  const toRow = list.find((r) => Number(r.id_bodega) === toId);
+  await q(
+    `DELETE FROM ${TABLE_BODEGA_ITEMS} WHERE id_item = ?`,
+    [itemId]
+  );
 
-  const newFromQty = fromQty - qty;
+  await q(
+    `DELETE FROM ${TABLE_ITEMS} WHERE id_item = ?`,
+    [itemId]
+  );
+
+  return { id: itemId };
+}
+
+/**
+ * Mueve cantidad de un ítem entre bodegas (bodega_items).
+ */
+async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
+  const itemId = Number(id);
+  const fromId = Number(fromBodegaId);
+  const toId = Number(toBodegaId);
+  const qty = Number(cantidad);
+
+  if (!itemId || !fromId || !toId || !qty || qty <= 0) {
+    throw new Error('Parámetros inválidos para mover cantidad');
+  }
+
+  // Validamos stock en origen
+  const fromRows = await q(
+    `SELECT * FROM ${TABLE_BODEGA_ITEMS}
+     WHERE id_bodega = ? AND id_item = ?`,
+    [fromId, itemId]
+  );
+  const fromRow = fromRows[0];
+
+  if (!fromRow) {
+    throw new Error('No existe stock en la bodega de origen');
+  }
+
+  const currentFromQty = Number(fromRow.qty || 0);
+  if (currentFromQty < qty) {
+    throw new Error('Stock insuficiente en la bodega de origen');
+  }
+
+  // Leemos destino (si existe)
+  const toRows = await q(
+    `SELECT * FROM ${TABLE_BODEGA_ITEMS}
+     WHERE id_bodega = ? AND id_item = ?`,
+    [toId, itemId]
+  );
+  const toRow = toRows[0];
+
+  // Actualizamos origen
+  const newFromQty = currentFromQty - qty;
   if (newFromQty > 0) {
-    await store.update(
-      TABLE_BODEGA_ITEMS,
-      { id_bodega: fromRow.id_bodega, id_item: itemId },
-      { qty: newFromQty }
+    await q(
+      `UPDATE ${TABLE_BODEGA_ITEMS}
+       SET qty = ?
+       WHERE id_bodega = ? AND id_item = ?`,
+      [newFromQty, fromId, itemId]
     );
   } else {
-    await store.remove(TABLE_BODEGA_ITEMS, {
-      id_bodega: fromRow.id_bodega,
-      id_item: itemId,
-    });
+    await q(
+      `DELETE FROM ${TABLE_BODEGA_ITEMS}
+       WHERE id_bodega = ? AND id_item = ?`,
+      [fromId, itemId]
+    );
   }
 
-  if (toRow) {
-    const newToQty = Number(toRow.qty || 0) + qty;
-    await store.update(
-      TABLE_BODEGA_ITEMS,
-      { id_bodega: toRow.id_bodega, id_item: itemId },
-      { qty: newToQty }
+  // Actualizamos/inserta destino
+  if (!toRow) {
+    await q(
+      `INSERT INTO ${TABLE_BODEGA_ITEMS}
+       (id_bodega, id_item, qty)
+       VALUES (?, ?, ?)`,
+      [toId, itemId, qty]
     );
   } else {
-    await store.insert(TABLE_BODEGA_ITEMS, {
-      id_bodega: toId,
-      id_item: itemId,
-      qty: qty,
-    });
+    const currentToQty = Number(toRow.qty || 0);
+    const newToQty = currentToQty + qty;
+
+    await q(
+      `UPDATE ${TABLE_BODEGA_ITEMS}
+       SET qty = ?
+       WHERE id_bodega = ? AND id_item = ?`,
+      [newToQty, toId, itemId]
+    );
   }
 
   return {
     ok: true,
     moved: qty,
-    fromBodegaId: fromRow.id_bodega,
+    fromBodegaId: fromId,
     toBodegaId: toId,
   };
 }
 
 module.exports = {
   list,
+  get,
   upsert,
   remove,
   moveQty,

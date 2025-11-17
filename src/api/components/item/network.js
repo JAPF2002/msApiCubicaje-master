@@ -5,6 +5,7 @@ const router = express.Router();
 
 // Lógica de negocio de ítems
 const controller = require('./controller/controller');
+const response = require('../../../utils/response');
 
 /**
  * GET /api/items
@@ -18,98 +19,92 @@ router.get('/', async (req, res) => {
     const bodegaIdRaw = req.query.bodegaId || req.query.id_bodega;
     let body = all;
 
-    if (bodegaIdRaw) {
+    if (bodegaIdRaw != null) {
       const bId = Number(bodegaIdRaw);
-      body = all.filter(
-        (it) => Number(it.bodegaId || 0) === bId
-      );
+      if (!Number.isNaN(bId)) {
+        body = all.filter(
+          (it) => Number(it.bodegaId ?? 0) === bId
+        );
+      }
     }
 
-    res.json({
-      error: false,
-      status: 200,
-      body,
-    });
+    return response.success(req, res, 200, body);
   } catch (err) {
     console.error('[GET /api/items] ERROR:', err);
-    res.status(500).json({
-      error: true,
-      status: 500,
-      message: 'Error obteniendo items',
-    });
+    return response.error(
+      req,
+      res,
+      500,
+      err.message || 'Error obteniendo ítems'
+    );
+  }
+});
+
+/**
+ * GET /api/items/:id
+ * Obtiene un ítem por ID.
+ */
+router.get('/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id || 0);
+    if (!id) {
+      return response.error(req, res, 400, 'ID inválido');
+    }
+
+    const data = await controller.get(id);
+    return response.success(req, res, 200, data);
+  } catch (err) {
+    console.error('[GET /api/items/:id] ERROR:', err);
+    return response.error(
+      req,
+      res,
+      404,
+      err.message || 'Ítem no encontrado'
+    );
   }
 });
 
 /**
  * POST /api/items
- * Crea un nuevo item (items) + su stock en bodega_items (si se envía bodegaId + cantidad).
- *
- * Body ejemplo:
- * {
- *   "nombre": "Caja 1x1x1",
- *   "id_categoria": 2,
- *   "ancho": 1,
- *   "largo": 1,
- *   "alto": 1,
- *   "peso": 5,
- *   "bodegaId": 19,
- *   "cantidad": 10
- * }
+ * Crea un nuevo item (tabla items) y opcionalmente su stock en bodega_items
+ * si viene bodegaId + cantidad.
  */
 router.post('/', async (req, res) => {
   try {
     const data = req.body || {};
     const result = await controller.upsert(data, true); // creating = true
 
-    res.status(201).json({
-      error: false,
-      status: 201,
-      body: result, // { id: idItem }
-    });
+    return response.success(req, res, 201, result);
   } catch (err) {
     console.error('[POST /api/items] ERROR:', err);
-    res.status(400).json({
-      error: true,
-      status: 400,
-      message: err.message || 'Error creando item',
-    });
+    return response.error(
+      req,
+      res,
+      400,
+      err.message || 'Error creando ítem'
+    );
   }
 });
 
 /**
- * PUT /api/items/:id
+ * PUT /api/items
  * Actualiza un item existente y/o su cantidad en una bodega.
+ * El ID debe venir en body como id o id_item.
  */
-router.put('/:id', async (req, res) => {
+router.put('/', async (req, res) => {
   try {
-    const id = Number(req.params.id || 0);
-    if (!id) {
-      return res.status(400).json({
-        error: true,
-        status: 400,
-        message: 'ID inválido',
-      });
-    }
-
-    const data = {
-      ...(req.body || {}),
-      id_item: id, // para que el controller lo reconozca
-    };
-
+    const data = req.body || {};
     const result = await controller.upsert(data, false); // creating = false
 
-    res.json({
-      error: false,
-      status: 200,
-      body: result || { id },
-    });
+    return response.success(req, res, 200, result);
   } catch (err) {
-    console.error('[PUT /api/items/:id] ERROR:', err);
-    res.status(400).json({
-      error: true,
-      status: 400,
-      message: err.message || 'Error actualizando item',
-    });
+    console.error('[PUT /api/items] ERROR:', err);
+    return response.error(
+      req,
+      res,
+      400,
+      err.message || 'Error actualizando ítem'
+    );
   }
 });
 
@@ -121,27 +116,19 @@ router.delete('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id || 0);
     if (!id) {
-      return res.status(400).json({
-        error: true,
-        status: 400,
-        message: 'ID inválido',
-      });
+      return response.error(req, res, 400, 'ID inválido');
     }
 
-    await controller.remove(id);
-
-    res.json({
-      error: false,
-      status: 200,
-      body: { id },
-    });
+    const result = await controller.remove(id);
+    return response.success(req, res, 200, result);
   } catch (err) {
     console.error('[DELETE /api/items/:id] ERROR:', err);
-    res.status(400).json({
-      error: true,
-      status: 400,
-      message: err.message || 'Error eliminando item',
-    });
+    return response.error(
+      req,
+      res,
+      400,
+      err.message || 'Error eliminando ítem'
+    );
   }
 });
 
@@ -159,27 +146,22 @@ router.delete('/:id', async (req, res) => {
 router.post('/:id/move', async (req, res) => {
   try {
     const id = Number(req.params.id || 0);
-    const { fromBodegaId, toBodegaId, cantidad } = req.body || {};
-
-    const result = await controller.moveQty({
+    const payload = {
       id,
-      fromBodegaId,
-      toBodegaId,
-      cantidad,
-    });
+      ...(req.body || {}),
+    };
 
-    res.json({
-      error: false,
-      status: 200,
-      body: result,
-    });
+    const result = await controller.moveQty(payload);
+
+    return response.success(req, res, 200, result);
   } catch (err) {
     console.error('[POST /api/items/:id/move] ERROR:', err);
-    res.status(400).json({
-      error: true,
-      status: 400,
-      message: err.message || 'Error moviendo cantidad entre bodegas',
-    });
+    return response.error(
+      req,
+      res,
+      400,
+      err.message || 'Error moviendo cantidad entre bodegas'
+    );
   }
 });
 

@@ -1,42 +1,35 @@
-// src/api/components/category/network.js
+// msApiCubicaje-master/src/api/components/category/network.js
+
 const express = require('express');
 const router = express.Router();
-const db = require('../../../store'); // 👈 ESTE
 
-// Wrapper a Promesa usando db.query (callback-style adaptado)
-function q(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.query(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
-    });
-  });
-}
-
+// Este store es el wrapper que habla con msMysqlCubicaje (src/store.js)
+const store = require('../../../store');
 
 /**
  * GET /api/categorias
+ * Devuelve todas las categorías tal cual vienen de la BD.
+ * Formato de respuesta:
+ * {
+ *   "error": false,
+ *   "status": 200,
+ *   "body": [ { id_categoria, nombre, descripcion, activo, ... }, ... ]
+ * }
  */
 router.get('/', async (req, res) => {
   try {
-    const rows = await q(
-      `SELECT
-         id_categoria,
-         nombre,
-         descripcion,
-         activo,
-         fecha_creacion,
-         fecha_actualizacion
-       FROM categorias
-       WHERE activo = 1
-       ORDER BY id_categoria ASC`
-    );
+    // Usamos la capa de datos normalizada
+    const rows = await store.list('categorias');
 
     console.log('[GET /api/categorias] ->', rows.length, 'registros');
-    res.json({ error: false, status: 200, body: rows });
+    return res.json({
+      error: false,
+      status: 200,
+      body: rows,
+    });
   } catch (err) {
     console.log('[GET /api/categorias] ERROR:', err);
-    res.status(500).json({
+    return res.status(500).json({
       error: true,
       status: 500,
       message: 'Error obteniendo categorías',
