@@ -178,17 +178,54 @@ async function upsert(data = {}, creating = false) {
 /**
  * Elimina un ítem y todas sus relaciones en bodega_items.
  */
+/**
+ * Elimina un ítem y todas sus relaciones en bodega_items,
+ * registrando un EGRESO en item_movimientos por cada bodega
+ * donde tenía stock.
+ */
 async function remove(id) {
   const itemId = Number(id);
   if (!itemId) {
     throw new Error('ID inválido');
   }
 
+  // 1) Leer el stock actual por bodega para este ítem
+  const stockRows = await q(
+    `SELECT id_bodega, qty FROM ${TABLE_BODEGA_ITEMS} WHERE id_item = ?`,
+    [itemId]
+  );
+
+  // 2) Registrar un movimiento de EGRESO por cada bodega con stock
+  for (const row of stockRows) {
+    const qty = Number(row.qty || 0);
+    if (!qty) continue;
+
+    const meta = {
+      source: 'api/items DELETE',
+      reason: 'deleteItem',
+    };
+
+    await q(
+      `INSERT INTO item_movimientos
+        (id_item, id_bodega_origen, id_bodega_destino, qty, tipo, motivo, meta)
+       VALUES (?, ?, NULL, ?, 'egreso', ?, ?)`,
+      [
+        itemId,
+        row.id_bodega,
+        qty,
+        'Eliminación de ítem desde la app',
+        JSON.stringify(meta),
+      ]
+    );
+  }
+
+  // 3) Borrar el stock en bodega_items
   await q(
     `DELETE FROM ${TABLE_BODEGA_ITEMS} WHERE id_item = ?`,
     [itemId]
   );
 
+  // 4) Borrar el ítem de la tabla items
   await q(
     `DELETE FROM ${TABLE_ITEMS} WHERE id_item = ?`,
     [itemId]
@@ -196,6 +233,7 @@ async function remove(id) {
 
   return { id: itemId };
 }
+
 
 /**
  * Mueve cantidad de un ítem entre bodegas (bodega_items).
