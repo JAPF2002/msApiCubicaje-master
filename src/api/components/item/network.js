@@ -19,149 +19,212 @@ router.get('/', async (req, res) => {
     const bodegaIdRaw = req.query.bodegaId || req.query.id_bodega;
     let body = all;
 
-    if (bodegaIdRaw != null) {
+    if (bodegaIdRaw) {
       const bId = Number(bodegaIdRaw);
-      if (!Number.isNaN(bId)) {
-        body = all.filter(
-          (it) => Number(it.bodegaId ?? 0) === bId
-        );
-      }
+      body = all.filter((it) => Number(it.bodegaId || 0) === bId);
     }
 
-    return response.success(req, res, 200, body);
+    return res.json({
+      error: false,
+      status: 200,
+      body,
+    });
   } catch (err) {
-    console.error('[GET /api/items] ERROR:', err);
-    return response.error(
-      req,
-      res,
-      500,
-      err.message || 'Error obteniendo ítems'
-    );
+    console.log('[GET /api/items] ERROR:', err);
+    return res.status(500).json({
+      error: true,
+      status: 500,
+      message: err.message || 'Error obteniendo items',
+    });
+  }
+});
+
+/**
+ * GET /api/items/:id/movimientos
+ * Devuelve el historial (kardex) de un ítem.
+ * IMPORTANTE: esta ruta va antes de GET /:id para que no la capture como un id.
+ */
+router.get('/:id/movimientos', async (req, res) => {
+  try {
+    const id = Number(req.params.id || 0);
+    if (!id) {
+      return res.status(400).json({
+        error: true,
+        status: 400,
+        message: 'ID inválido',
+      });
+    }
+
+    const movimientos = await controller.getMovements(id);
+
+    return res.json({
+      error: false,
+      status: 200,
+      body: movimientos,
+    });
+  } catch (err) {
+    console.log('[GET /api/items/:id/movimientos] ERROR:', err);
+    return res.status(500).json({
+      error: true,
+      status: 500,
+      message: err.message || 'Error obteniendo movimientos del item',
+    });
   }
 });
 
 /**
  * GET /api/items/:id
- * Obtiene un ítem por ID.
+ * Devuelve solo el registro base del ítem (tabla items).
  */
 router.get('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id || 0);
     if (!id) {
-      return response.error(req, res, 400, 'ID inválido');
+      return res.status(400).json({
+        error: true,
+        status: 400,
+        message: 'ID inválido',
+      });
     }
 
     const data = await controller.get(id);
-    return response.success(req, res, 200, data);
+
+    return res.json({
+      error: false,
+      status: 200,
+      body: data,
+    });
   } catch (err) {
-    console.error('[GET /api/items/:id] ERROR:', err);
-    return response.error(
-      req,
-      res,
-      404,
-      err.message || 'Ítem no encontrado'
-    );
+    console.log('[GET /api/items/:id] ERROR:', err);
+    return res.status(404).json({
+      error: true,
+      status: 404,
+      message: err.message || 'Ítem no encontrado',
+    });
   }
 });
 
 /**
  * POST /api/items
- * Crea un nuevo item (tabla items) y opcionalmente su stock en bodega_items
- * si viene bodegaId + cantidad.
+ * Crea un nuevo item (items) + su stock en bodega_items (si se envía bodegaId + cantidad).
  */
 router.post('/', async (req, res) => {
   try {
     const data = req.body || {};
     const result = await controller.upsert(data, true); // creating = true
 
-    return response.success(req, res, 201, result);
+    return res.status(201).json({
+      error: false,
+      status: 201,
+      body: result, // { id: idItem }
+    });
   } catch (err) {
-    console.error('[POST /api/items] ERROR:', err);
-    return response.error(
-      req,
-      res,
-      400,
-      err.message || 'Error creando ítem'
-    );
+    console.log('[POST /api/items] ERROR:', err);
+    return res.status(400).json({
+      error: true,
+      status: 400,
+      message: err.message || 'Error creando item',
+    });
   }
 });
 
 /**
- * PUT /api/items
+ * PUT /api/items/:id
  * Actualiza un item existente y/o su cantidad en una bodega.
- * El ID debe venir en body como id o id_item.
  */
-router.put('/', async (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
-    const data = req.body || {};
+    const id = Number(req.params.id || 0);
+    if (!id) {
+      return res.status(400).json({
+        error: true,
+        status: 400,
+        message: 'ID inválido',
+      });
+    }
+
+    const data = {
+      ...(req.body || {}),
+      id_item: id, // para que el controller lo reconozca
+    };
+
     const result = await controller.upsert(data, false); // creating = false
 
-    return response.success(req, res, 200, result);
+    return res.json({
+      error: false,
+      status: 200,
+      body: result || { id },
+    });
   } catch (err) {
-    console.error('[PUT /api/items] ERROR:', err);
-    return response.error(
-      req,
-      res,
-      400,
-      err.message || 'Error actualizando ítem'
-    );
+    console.log('[PUT /api/items/:id] ERROR:', err);
+    return res.status(400).json({
+      error: true,
+      status: 400,
+      message: err.message || 'Error actualizando item',
+    });
   }
 });
 
 /**
  * DELETE /api/items/:id
- * Elimina el ítem (items + bodega_items).
+ * Elimina el ítem (items + bodega_items) y registra EGRESOS en item_movimientos.
  */
 router.delete('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id || 0);
     if (!id) {
-      return response.error(req, res, 400, 'ID inválido');
+      return res.status(400).json({
+        error: true,
+        status: 400,
+        message: 'ID inválido',
+      });
     }
 
-    const result = await controller.remove(id);
-    return response.success(req, res, 200, result);
+    await controller.remove(id);
+
+    return res.json({
+      error: false,
+      status: 200,
+      body: { id },
+    });
   } catch (err) {
-    console.error('[DELETE /api/items/:id] ERROR:', err);
-    return response.error(
-      req,
-      res,
-      400,
-      err.message || 'Error eliminando ítem'
-    );
+    console.log('[DELETE /api/items/:id] ERROR:', err);
+    return res.status(400).json({
+      error: true,
+      status: 400,
+      message: err.message || 'Error eliminando item',
+    });
   }
 });
 
 /**
  * POST /api/items/:id/move
  * Mueve cantidad de un item desde una bodega a otra.
- *
- * Body ejemplo:
- * {
- *   "fromBodegaId": 13,
- *   "toBodegaId": 19,
- *   "cantidad": 5
- * }
  */
 router.post('/:id/move', async (req, res) => {
   try {
     const id = Number(req.params.id || 0);
-    const payload = {
+    const { fromBodegaId, toBodegaId, cantidad } = req.body || {};
+
+    const result = await controller.moveQty({
       id,
-      ...(req.body || {}),
-    };
+      fromBodegaId,
+      toBodegaId,
+      cantidad,
+    });
 
-    const result = await controller.moveQty(payload);
-
-    return response.success(req, res, 200, result);
+    return res.json({
+      error: false,
+      status: 200,
+      body: result,
+    });
   } catch (err) {
-    console.error('[POST /api/items/:id/move] ERROR:', err);
-    return response.error(
-      req,
-      res,
-      400,
-      err.message || 'Error moviendo cantidad entre bodegas'
-    );
+    console.log('[POST /api/items/:id/move] ERROR:', err);
+    return res.status(400).json({
+      error: true,
+      status: 400,
+      message: err.message || 'Error moviendo cantidad entre bodegas',
+    });
   }
 });
 

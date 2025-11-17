@@ -344,6 +344,32 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
   };
 }
 
+/**
+ * Devuelve el historial de movimientos (kardex) de un ítem.
+ */
+async function getMovements(id) {
+  const itemId = Number(id);
+  if (!itemId) {
+    throw new Error('ID inválido');
+  }
+
+  const rows = await q(
+    `SELECT 
+        m.*,
+        bo.nombre AS bodega_origen_nombre,
+        bd.nombre AS bodega_destino_nombre
+     FROM item_movimientos m
+     LEFT JOIN bodegas bo ON bo.id_bodega = m.id_bodega_origen
+     LEFT JOIN bodegas bd ON bd.id_bodega = m.id_bodega_destino
+     WHERE m.id_item = ?
+     ORDER BY m.fecha_creacion DESC, m.id_mov DESC`,
+    [itemId]
+  );
+
+  return rows;
+}
+
+
 
 module.exports = {
   list,
@@ -351,4 +377,6 @@ module.exports = {
   upsert,
   remove,
   moveQty,
+  getMovements,
 };
+
