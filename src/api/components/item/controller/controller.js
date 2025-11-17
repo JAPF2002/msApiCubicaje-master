@@ -238,6 +238,10 @@ async function remove(id) {
 /**
  * Mueve cantidad de un ítem entre bodegas (bodega_items).
  */
+/**
+ * Mueve cantidad de un ítem entre bodegas (bodega_items)
+ * y registra una TRANSFERENCIA en item_movimientos.
+ */
 async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
   const itemId = Number(id);
   const fromId = Number(fromBodegaId);
@@ -248,7 +252,7 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
     throw new Error('Parámetros inválidos para mover cantidad');
   }
 
-  // Validamos stock en origen
+  // 1) Validamos stock en origen
   const fromRows = await q(
     `SELECT * FROM ${TABLE_BODEGA_ITEMS}
      WHERE id_bodega = ? AND id_item = ?`,
@@ -265,7 +269,7 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
     throw new Error('Stock insuficiente en la bodega de origen');
   }
 
-  // Leemos destino (si existe)
+  // 2) Leemos destino (si existe)
   const toRows = await q(
     `SELECT * FROM ${TABLE_BODEGA_ITEMS}
      WHERE id_bodega = ? AND id_item = ?`,
@@ -273,7 +277,7 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
   );
   const toRow = toRows[0];
 
-  // Actualizamos origen
+  // 3) Actualizamos origen
   const newFromQty = currentFromQty - qty;
   if (newFromQty > 0) {
     await q(
@@ -283,6 +287,7 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
       [newFromQty, fromId, itemId]
     );
   } else {
+    // Si queda en 0, borramos el registro
     await q(
       `DELETE FROM ${TABLE_BODEGA_ITEMS}
        WHERE id_bodega = ? AND id_item = ?`,
@@ -290,7 +295,7 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
     );
   }
 
-  // Actualizamos/inserta destino
+  // 4) Actualizamos/insertamos destino
   if (!toRow) {
     await q(
       `INSERT INTO ${TABLE_BODEGA_ITEMS}
@@ -310,6 +315,27 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
     );
   }
 
+  // 5) Registrar la TRANSFERENCIA en item_movimientos
+  const meta = {
+    source: 'api/items/:id/move',
+    fromBodegaId: fromId,
+    toBodegaId: toId,
+  };
+
+  await q(
+    `INSERT INTO item_movimientos
+      (id_item, id_bodega_origen, id_bodega_destino, qty, tipo, motivo, meta)
+     VALUES (?, ?, ?, ?, 'transferencia', ?, ?)`,
+    [
+      itemId,
+      fromId,
+      toId,
+      qty,
+      'Transferencia de stock entre bodegas desde la app',
+      JSON.stringify(meta),
+    ]
+  );
+
   return {
     ok: true,
     moved: qty,
@@ -317,6 +343,7 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
     toBodegaId: toId,
   };
 }
+
 
 module.exports = {
   list,
