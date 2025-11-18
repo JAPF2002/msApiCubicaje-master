@@ -17,19 +17,27 @@ function q(sql, params = []) {
  *  HELPERS PARA LAYOUT + UBICACIONES
  * ========================================================================= */
 
+
+/* =========================================================================
+ *  HELPERS PARA LAYOUT + UBICACIONES
+ * ========================================================================= */
+
 // Guarda / actualiza el layout de una bodega y regenera ubicaciones
 async function upsertLayoutForBodega(id_bodega, layout) {
-  if (!layout || !layout.mapa_json) return;
+  if (!layout || !layout.mapa_json) {
+    console.log('[upsertLayoutForBodega] sin layout, no se guarda nada');
+    return;
+  }
 
   const anchoLayout = Number(layout.ancho) || 0;
   const largoLayout = Number(layout.largo) || 0;
 
+  // Nos aseguramos de mandar un JSON válido a MySQL
   const mapaJsonString =
     typeof layout.mapa_json === 'string'
       ? layout.mapa_json
       : JSON.stringify(layout.mapa_json);
 
-  // ⚠️ Idealmente en bodega_layouts deberías tener UNIQUE(id_bodega)
   const sql = `
     INSERT INTO bodega_layouts
       (id_bodega, ancho, largo, mapa_json, fecha_creacion, fecha_actualizacion)
@@ -41,15 +49,28 @@ async function upsertLayoutForBodega(id_bodega, layout) {
       fecha_actualizacion = NOW()
   `;
 
-  await q(sql, [id_bodega, anchoLayout, largoLayout, mapaJsonString]);
+  try {
+    await q(sql, [id_bodega, anchoLayout, largoLayout, mapaJsonString]);
+    console.log('[upsertLayoutForBodega] layout guardado OK para bodega', id_bodega);
+  } catch (err) {
+    console.error('[upsertLayoutForBodega] ERROR SQL:', err);
+    throw err; // esto hará que el POST/PUT devuelva 500 si algo falla
+  }
 
   // Después de guardar el layout, regeneramos las ubicaciones disponibles
-  await regenUbicacionesDesdeLayout(id_bodega, {
-    ancho: anchoLayout,
-    largo: largoLayout,
-    mapa_json: layout.mapa_json,
-  });
+  try {
+    await regenUbicacionesDesdeLayout(id_bodega, {
+      ancho: anchoLayout,
+      largo: largoLayout,
+      mapa_json: layout.mapa_json,
+    });
+    console.log('[upsertLayoutForBodega] ubicaciones regeneradas para bodega', id_bodega);
+  } catch (err) {
+    console.error('[upsertLayoutForBodega] ERROR regenerando ubicaciones:', err);
+    // si quieres que aunque falle esto igual se considere éxito, no relanzamos el error
+  }
 }
+
 
 // Crea bodega_ubicaciones a partir de mapa_json (solo celdas "D")
 async function regenUbicacionesDesdeLayout(id_bodega, layout) {
