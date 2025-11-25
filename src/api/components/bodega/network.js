@@ -1,7 +1,14 @@
 // msApiCubicaje-master/src/api/components/bodega/network.js
 const express = require('express');
 const router = express.Router();
+const {
+  optimizarBodegaSimple,
+  recubicarBodegaPorPrioridad,
+} = require('./algoritmoCubicaje');
+
 const db = require('../../../store'); // 👈 tu módulo original
+
+
 
 // Wrapper a Promesa usando db.query (callback-style adaptado)
 function q(sql, params = []) {
@@ -13,14 +20,192 @@ function q(sql, params = []) {
   });
 }
 
+
 /* =========================================================================
  *  HELPERS PARA LAYOUT + UBICACIONES
  * ========================================================================= */
 
 
-/* =========================================================================
- *  HELPERS PARA LAYOUT + UBICACIONES
- * ========================================================================= */
+// Obtiene bodega + layout para calcular tamaño de celda estándar
+async function getBodegaConLayout(id_bodega) {
+  const rows = await q(
+    `
+    SELECT
+      b.id_bodega,
+      b.ancho    AS b_ancho,
+      b.largo    AS b_largo,
+      b.alto     AS b_alto,
+      l.ancho    AS g_ancho,
+      l.largo    AS g_largo
+    FROM bodegas b
+    LEFT JOIN bodega_layouts l
+      ON l.id_bodega = b.id_bodega
+    WHERE b.id_bodega = ?
+    LIMIT 1
+  `,
+    [id_bodega]
+  );
+
+  if (!rows.length) {
+    const err = new Error('BODEGA_NOT_FOUND');
+    err.code = 'BODEGA_NOT_FOUND';
+    throw err;
+  }
+
+  return rows[0];
+}
+
+// A partir de bodega + layout, calcula dimensiones de una celda física
+function calcularCeldaEstandar(bodegaRow) {
+  const bAncho = Number(bodegaRow.b_ancho) || 0;
+  const bLargo = Number(bodegaRow.b_largo) || 0;
+  const bAlto  = Number(bodegaRow.b_alto)  || 0;
+
+  const gAncho = Number(bodegaRow.g_ancho) || 0;
+  const gLargo = Number(bodegaRow.g_largo) || 0;
+
+  if (!bAncho || !bLargo || !bAlto || !gAncho || !gLargo) {
+    // No hay datos suficientes para calcular celda
+    return null;
+  }
+
+  return {
+    width:  bAncho / gAncho,  // ancho físico de una celda
+    length: bLargo / gLargo,  // largo físico de una celda
+    height: bAlto,            // altura útil de la celda (simplificación)
+  };
+}
+
+// Obtiene dimensiones de un ítem
+async function getItemDimensiones(id_item) {
+  const rows = await q(
+    `
+    SELECT
+      id_item,
+      nombre,
+      ancho,
+      largo,
+      alto
+    FROM items
+    WHERE id_item = ?
+    LIMIT 1
+  `,
+    [id_item]
+  );
+
+  if (!rows.length) {
+    const err = new Error('ITEM_NOT_FOUND');
+    err.code = 'ITEM_NOT_FOUND';
+    throw err;
+  }
+
+  const it = rows[0];
+  return {
+    id_item: it.id_item,
+    nombre: it.nombre,
+    width:  Number(it.ancho) || 0,
+    length: Number(it.largo) || 0,
+    height: Number(it.alto)  || 0,
+  };
+}
+
+
+
+
+
+/**
+ * Calcula la mejor orientación 3D del ítem dentro de la celda estándar.
+ * Si no cabe en ninguna orientación, devuelve null.
+ * Si cabe, devuelve { width, length, height, maxStack }.
+ */
+function calcularMejorOrientacionItem(itemDims, celdaDims) {
+  // Si la bodega no tiene layout/celda, no bloqueamos y no limitamos apilamiento.
+  if (!celdaDims) {
+    return {
+      width: itemDims.width,
+      length: itemDims.length,
+      height: itemDims.height,
+      maxStack: Number.MAX_SAFE_INTEGER, // sin límite práctico
+    };
+  }
+
+  const { width: Wc, length: Lc, height: Hc } = celdaDims;
+  const dims = [
+    Number(itemDims.width) || 0,
+    Number(itemDims.length) || 0,
+    Number(itemDims.height) || 0,
+  ];
+
+  // Si falta alguna dimensión, no podemos razonar bien -> no bloqueamos.
+  if (!dims[0] || !dims[1] || !dims[2]) {
+    return {
+      width: itemDims.width,
+      length: itemDims.length,
+      height: itemDims.height,
+      maxStack: Number.MAX_SAFE_INTEGER,
+    };
+  }
+
+  // 6 permutaciones de (ancho, alto, largo)
+  const perms = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+  ];
+
+  let best = null;
+
+  for (const [iW, iH, iL] of perms) {
+    const w = dims[iW]; // ancho en esta orientación
+    const h = dims[iH]; // alto  en esta orientación
+    const l = dims[iL]; // largo en esta orientación
+
+    // ¿Cabe esta orientación dentro de la celda?
+    if (w <= Wc && l <= Lc && h <= Hc) {
+      const maxStack = Math.max(1, Math.floor(Hc / h));
+      const baseArea = w * l;
+
+      if (
+        !best ||
+        maxStack > best.maxStack || // más unidades apiladas
+        (maxStack === best.maxStack && baseArea < best.baseArea) // misma altura, base más pequeña
+      ) {
+        best = { width: w, length: l, height: h, maxStack, baseArea };
+      }
+    }
+  }
+
+  if (!best) return null;
+
+  return {
+    width: best.width,
+    length: best.length,
+    height: best.height,
+    maxStack: best.maxStack,
+  };
+}
+
+
+
+
+
+// Verifica si el ítem cabe en una celda estándar
+function itemCabeEnCelda(itemDims, celdaDims) {
+  if (!celdaDims) return true; // si no tenemos layout, no bloqueamos nada
+
+  const { width: Wi, length: Li, height: Hi } = itemDims;
+  const { width: Wc, length: Lc, height: Hc } = celdaDims;
+
+  // Si alguna dimensión del ítem es 0, lo consideramos inválido para
+  // chequeo físico, pero no bloqueamos (puedes endurecer esta regla si quieres)
+  if (!Wi || !Li || !Hi) return true;
+
+  return Wi <= Wc && Li <= Lc && Hi <= Hc;
+}
+
 
 // Guarda / actualiza el layout de una bodega y regenera ubicaciones
 async function upsertLayoutForBodega(id_bodega, layout) {
@@ -94,12 +279,13 @@ async function regenUbicacionesDesdeLayout(id_bodega, layout) {
 
   const totalCeldas = ancho * largo;
 
-  // 2) Recorrer todas las celdas del grid y crear ubicaciones solo para "D"
+// 2) Recorrer todas las celdas del grid y crear ubicaciones para "D" y "A"
+// Creamos ubicación si es D (disponible) o A (altura libre). B y O se saltan.
   for (let index = 0; index < totalCeldas; index++) {
     const estado = mapa[index] ?? mapa[String(index)] ?? 'D';
 
     // Solo creamos ubicación si la celda es DISPONIBLE
-    if (estado !== 'D') continue;
+    if (estado === 'B' || estado === 'O') continue;
 
     const x = index % ancho;
     const y = Math.floor(index / ancho);
@@ -132,31 +318,77 @@ async function regenUbicacionesDesdeLayout(id_bodega, layout) {
  * ========================================================================= */
 
 async function asignarItemAuto(id_bodega, id_item) {
-  // 1) Buscar una ubicación activa SIN items
-  const libres = await q(
-    `
-    SELECT u.id_ubicacion
-    FROM bodega_ubicaciones u
-    LEFT JOIN bodega_ubicacion_items ui
-      ON ui.id_ubicacion = u.id_ubicacion
-    WHERE u.id_bodega = ?
-      AND u.activo = 1
-      AND ui.id_ubicacion IS NULL
-    ORDER BY u.id_ubicacion ASC
-    LIMIT 1
-  `,
-    [id_bodega]
-  );
+  // 0) Cargar bodega + layout y dimensiones del ítem
+  const bodegaRow = await getBodegaConLayout(id_bodega);
+  const celdaDims = calcularCeldaEstandar(bodegaRow);
+  const itemDims  = await getItemDimensiones(id_item);
 
-  if (!libres.length) {
-    const err = new Error('NO_FREE_LOCATION');
-    err.code = 'NO_FREE_LOCATION';
+  // 1) Calcular mejor orientación 3D + capacidad de apilamiento
+  const fit = calcularMejorOrientacionItem(itemDims, celdaDims);
+
+  if (!fit) {
+    const err = new Error(
+      `ITEM_TOO_BIG_FOR_CELL: El ítem "${itemDims.nombre}" ` +
+      'no cabe en ninguna orientación dentro de una posición estándar de esta bodega.'
+    );
+    err.code = 'ITEM_TOO_BIG_FOR_CELL';
     throw err;
   }
 
-  const id_ubicacion = libres[0].id_ubicacion;
+  const maxStack = fit.maxStack; // unidades máximas apiladas en una celda
 
-  // 2) Registrar el item en esa ubicación (1 unidad por defecto)
+  // 2) Intentar apilar en ubicaciones que YA tienen este ítem y no están llenas
+  let id_ubicacion = null;
+
+  const pilas = await q(
+    `
+    SELECT ui.id_ubicacion, ui.qty
+    FROM bodega_ubicacion_items ui
+    INNER JOIN bodega_ubicaciones u
+      ON u.id_ubicacion = ui.id_ubicacion
+    WHERE u.id_bodega = ?
+      AND u.activo = 1
+      AND ui.id_item = ?
+    ORDER BY ui.id_ubicacion ASC
+    `,
+    [id_bodega, id_item]
+  );
+
+  for (const p of pilas) {
+    const qty = Number(p.qty) || 0;
+    if (qty < maxStack) {
+      id_ubicacion = p.id_ubicacion;
+      break;
+    }
+  }
+
+  // 3) Si no encontramos pila con espacio, buscamos una ubicación vacía
+  if (!id_ubicacion) {
+    const libres = await q(
+      `
+      SELECT u.id_ubicacion
+      FROM bodega_ubicaciones u
+      LEFT JOIN bodega_ubicacion_items ui
+        ON ui.id_ubicacion = u.id_ubicacion
+      WHERE u.id_bodega = ?
+        AND u.activo = 1
+        AND ui.id_ubicacion IS NULL
+      ORDER BY u.id_ubicacion ASC
+      LIMIT 1
+    `,
+      [id_bodega]
+    );
+
+    if (!libres.length) {
+      const err = new Error('NO_FREE_LOCATION');
+      err.code = 'NO_FREE_LOCATION';
+      throw err;
+    }
+
+    id_ubicacion = libres[0].id_ubicacion;
+  }
+
+  // 4) Registrar el ítem en esa ubicación (1 unidad por defecto)
   await q(
     `
     INSERT INTO bodega_ubicacion_items
@@ -169,7 +401,7 @@ async function asignarItemAuto(id_bodega, id_item) {
     [id_ubicacion, id_item]
   );
 
-  // 3) (Opcional) mantener agregado por bodega en bodega_items
+  // 5) Mantener agregado por bodega en bodega_items
   await q(
     `
     INSERT INTO bodega_items
@@ -184,6 +416,7 @@ async function asignarItemAuto(id_bodega, id_item) {
 
   return { id_ubicacion };
 }
+
 
 /* =========================================================================
  *  ENDPOINTS BÁSICOS DE BODEGAS
@@ -490,6 +723,15 @@ router.post('/:id/items/auto', async (req, res) => {
       });
     }
 
+    if (err.code === 'ITEM_TOO_BIG_FOR_CELL') {
+      return res.status(409).json({
+        error: true,
+        status: 409,
+        message: err.message || 'El ítem no cabe en una posición estándar de esta bodega',
+      });
+    }
+
+
     res.status(500).json({
       error: true,
       status: 500,
@@ -497,5 +739,115 @@ router.post('/:id/items/auto', async (req, res) => {
     });
   }
 });
+
+
+
+/*---------------------------------------------------*/
+
+
+
+/**
+ * POST /api/bodegas/:id/optimizar-simple
+ * Ejecuta la heurística simple de cubicaje sobre una bodega.
+ */
+router.post('/:id/optimizar-simple', async (req, res) => {
+  const id_bodega = Number(req.params.id) || 0;
+
+  if (!id_bodega) {
+    return res.status(400).json({
+      error: true,
+      status: 400,
+      message: 'ID de bodega inválido',
+    });
+  }
+
+  try {
+    const result = await optimizarBodegaSimple(id_bodega);
+
+    res.json({
+      error: false,
+      status: 200,
+      body: result, // { movimientos: [...], mensaje: '...' }
+    });
+  } catch (err) {
+    console.log('[POST /api/bodegas/:id/optimizar-simple] ERROR:', err);
+    res.status(500).json({
+      error: true,
+      status: 500,
+      message: 'Error ejecutando la optimización de cubicaje',
+    });
+  }
+});
+
+
+/**
+ * POST /api/bodegas/:id/recubicar-prioridad
+ *
+ * Body:
+ * {
+ *   "items": [
+ *     { "id_item": 10, "prioridad": 3 },
+ *     { "id_item": 5,  "prioridad": 2 },
+ *     { "id_item": 7,  "prioridad": 1 }
+ *   ]
+ * }
+ *
+ * Solo mueve esos ítems (si son movibles) dentro de la bodega,
+ * intentando colocar primero los de mayor prioridad en las
+ * ubicaciones más "cercanas" (pos_y, pos_x pequeños).
+ */
+router.post('/:id/recubicar-prioridad', async (req, res) => {
+  const id_bodega = Number(req.params.id) || 0;
+  const { items } = req.body || {};
+
+  if (!id_bodega) {
+    return res.status(400).json({
+      error: true,
+      status: 400,
+      message: 'ID de bodega inválido',
+    });
+  }
+
+  if (!Array.isArray(items) || !items.length) {
+    return res.status(400).json({
+      error: true,
+      status: 400,
+      message: 'Debes enviar un array "items" con id_item y prioridad',
+    });
+  }
+
+  try {
+    const result = await recubicarBodegaPorPrioridad(id_bodega, items);
+
+    res.json({
+      error: false,
+      status: 200,
+      body: result, // { movimientos: [...], mensaje: '...' }
+    });
+  } catch (err) {
+    console.log('[POST /api/bodegas/:id/recubicar-prioridad] ERROR:', err);
+
+    if (
+      err.code === 'BODEGA_ID_INVALID' ||
+      err.code === 'ITEMS_LIST_EMPTY' ||
+      err.code === 'ITEMS_LIST_INVALID'
+    ) {
+      return res.status(400).json({
+        error: true,
+        status: 400,
+        message: err.message,
+      });
+    }
+
+    res.status(500).json({
+      error: true,
+      status: 500,
+      message: 'Error ejecutando recubicaje por prioridad',
+    });
+  }
+});
+
+
+
 
 module.exports = router;
