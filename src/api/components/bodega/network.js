@@ -850,4 +850,103 @@ router.post('/:id/recubicar-prioridad', async (req, res) => {
 
 
 
+
+
+
+
+/**
+ * GET /api/bodegas/:id/ubicaciones
+ * Devuelve ubicaciones activas de la bodega + items por ubicación
+ */
+router.get('/:id/ubicaciones', async (req, res) => {
+  const id_bodega = Number(req.params.id) || 0;
+
+  if (!id_bodega) {
+    return res.status(400).json({
+      error: true,
+      status: 400,
+      message: 'ID de bodega inválido',
+    });
+  }
+
+  try {
+    const rows = await q(
+      `
+      SELECT
+        u.id_ubicacion,
+        u.pos_x,
+        u.pos_y,
+        u.pos_z,
+        u.activo,
+        ui.id_item,
+        ui.qty,
+        ui.movible,
+        i.nombre AS item_nombre,
+        i.ancho  AS item_ancho,
+        i.largo  AS item_largo,
+        i.alto   AS item_alto,
+        i.id_categoria AS item_categoria_id
+      FROM bodega_ubicaciones u
+      LEFT JOIN bodega_ubicacion_items ui
+        ON ui.id_ubicacion = u.id_ubicacion
+      LEFT JOIN items i
+        ON i.id_item = ui.id_item
+      WHERE u.id_bodega = ?
+        AND u.activo = 1
+      ORDER BY u.pos_y ASC, u.pos_x ASC, u.id_ubicacion ASC
+      `,
+      [id_bodega]
+    );
+
+    // Agrupar: 1 objeto por ubicación, con items[] dentro
+    const map = new Map();
+
+    for (const r of rows) {
+      const idu = r.id_ubicacion;
+
+      if (!map.has(idu)) {
+        map.set(idu, {
+          id_ubicacion: idu,
+          pos_x: Number(r.pos_x) || 0,
+          pos_y: Number(r.pos_y) || 0,
+          pos_z: Number(r.pos_z) || 0,
+          activo: r.activo === 1 || r.activo === true,
+          items: [],
+        });
+      }
+
+      // si no hay item en esa ubicación, id_item viene null
+      if (r.id_item != null) {
+        map.get(idu).items.push({
+          id_item: Number(r.id_item),
+          nombre: r.item_nombre,
+          qty: Number(r.qty) || 0,
+          movible: r.movible === 1 || r.movible === true,
+          ancho: Number(r.item_ancho) || 0,
+          largo: Number(r.item_largo) || 0,
+          alto: Number(r.item_alto) || 0,
+          id_categoria: r.item_categoria_id != null ? Number(r.item_categoria_id) : null,
+        });
+      }
+    }
+
+    const ubicaciones = Array.from(map.values());
+
+    return res.json({
+      error: false,
+      status: 200,
+      body: ubicaciones,
+    });
+  } catch (err) {
+    console.log('[GET /api/bodegas/:id/ubicaciones] ERROR:', err);
+    return res.status(500).json({
+      error: true,
+      status: 500,
+      message: 'Error obteniendo ubicaciones de la bodega',
+    });
+  }
+});
+
+
+
 module.exports = router;
