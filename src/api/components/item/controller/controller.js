@@ -1,10 +1,11 @@
 // msApiCubicaje-master/src/api/components/item/controller/controller.js
 
 // Controlador de Items: encapsula la lógica de negocio de items + bodega_items
-const db = require('../../../../store');
+const db = require("../../../../store");
 
-const TABLE_ITEMS = 'items';
-const TABLE_BODEGA_ITEMS = 'bodega_items';
+const TABLE_ITEMS = "items";
+const TABLE_BODEGA_ITEMS = "bodega_items";
+const TABLE_MOVIMIENTOS = "item_movimientos"; // ✅ CAMBIO: constante para movimientos
 
 // Wrapper de Promesa sobre db.query (callback-style)
 function q(sql, params = []) {
@@ -16,6 +17,11 @@ function q(sql, params = []) {
   });
 }
 
+// Helper para distinguir "campo no viene" vs "viene con 0"
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
 // Normaliza un registro de items + un posible registro de bodega_items
 function buildItemRecord(itemRow, linkRow) {
   const id = Number(itemRow.id_item);
@@ -23,8 +29,7 @@ function buildItemRecord(itemRow, linkRow) {
     ...itemRow,
     id,
     id_item: id,
-    id_categoria:
-      itemRow.id_categoria != null ? Number(itemRow.id_categoria) : null,
+    id_categoria: itemRow.id_categoria != null ? Number(itemRow.id_categoria) : null,
     ancho: Number(itemRow.ancho || 0),
     largo: Number(itemRow.largo || 0),
     alto: Number(itemRow.alto || 0),
@@ -48,18 +53,47 @@ function buildItemRecord(itemRow, linkRow) {
 }
 
 /**
+ * ✅ CAMBIO (IMPORTANTE):
+ * Registra ingreso/egreso (no transferencia) en item_movimientos.
+ * - Para ingreso: id_bodega_destino = bodegaId
+ * - Para egreso : id_bodega_origen  = bodegaId
+ *
+ * 🔁 Si tu tabla o columnas tienen otro nombre, CAMBIA AQUÍ el INSERT.
+ */
+async function registrarMovimiento({ itemId, tipo, bodegaId, qty, motivo, meta = {} }) {
+  const n = Number(qty || 0);
+  const iid = Number(itemId || 0);
+  const bid = Number(bodegaId || 0);
+
+  if (!iid || !bid || n <= 0) return;
+
+  const isIngreso = tipo === "ingreso" || tipo === "ajuste_mas";
+  const isEgreso = tipo === "egreso" || tipo === "ajuste_menos";
+
+  await q(
+    `INSERT INTO ${TABLE_MOVIMIENTOS}
+      (id_item, id_bodega_origen, id_bodega_destino, qty, tipo, motivo, meta)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      iid,
+      isEgreso ? bid : null,
+      isIngreso ? bid : null,
+      n,
+      tipo,
+      motivo || "Movimiento de stock (ajuste) desde la app",
+      JSON.stringify({ source: "item.controller.upsert", ...meta }),
+    ]
+  );
+}
+
+/**
  * Devuelve lista normalizada de ítems combinando items + bodega_items.
  * Cada combinación (item, bodega) se expone como un registro.
  */
 async function list() {
   // Solo items activos
-  const items = await q(
-    `SELECT * FROM ${TABLE_ITEMS} WHERE activo = 1`
-  );
-
-  const rels = await q(
-    `SELECT * FROM ${TABLE_BODEGA_ITEMS}`
-  );
+  const items = await q(`SELECT * FROM ${TABLE_ITEMS} WHERE activo = 1`);
+  const rels = await q(`SELECT * FROM ${TABLE_BODEGA_ITEMS}`);
 
   // Agrupamos relaciones por id_item
   const byItem = new Map();
@@ -91,22 +125,20 @@ async function list() {
  * Obtiene un ítem por ID (solo el registro de items).
  */
 async function get(id) {
-  const rows = await q(
-    `SELECT * FROM ${TABLE_ITEMS} WHERE id_item = ?`,
-    [id]
-  );
+  const rows = await q(`SELECT * FROM ${TABLE_ITEMS} WHERE id_item = ?`, [id]);
   if (!rows || !rows.length) {
-    throw new Error('Ítem no encontrado');
+    throw new Error("Ítem no encontrado");
   }
   return rows[0];
 }
 
 /**
  * Crea o actualiza un ítem.
- * Si viene bodegaId + cantidad, también upsertea en bodega_items.
+ * Si viene bodegaId + cantidad (y cantidad VIENE en el payload), también upsertea en bodega_items
+ * y registra un movimiento (ingreso/egreso) por delta.
  */
 async function upsert(data = {}, creating = false) {
-  const nombre = (data.nombre || '').trim();
+  const nombre = (data.nombre || "").trim();
   const idCategoria = data.id_categoria ?? data.categoriaId ?? null;
   const ancho = Number(data.ancho || 0);
   const largo = Number(data.largo || 0);
@@ -115,10 +147,13 @@ async function upsert(data = {}, creating = false) {
   const estado = data.estado || null;
 
   const bodegaId = data.bodegaId ?? data.id_bodega ?? null;
-  const cantidad = Number(data.cantidad || 0);
+
+  // ✅ CAMBIO: si "cantidad" no viene, NO tocamos stock ni registramos movimiento
+  const cantidadProvided = hasOwn(data, "cantidad") || hasOwn(data, "qty");
+  const cantidad = cantidadProvided ? Math.max(0, Number(data.cantidad ?? data.qty ?? 0) || 0) : null;
 
   if (!nombre) {
-    throw new Error('Campo requerido faltante: nombre');
+    throw new Error("Campo requerido faltante: nombre");
   }
 
   let itemId = data.id_item || data.id || null;
@@ -134,7 +169,7 @@ async function upsert(data = {}, creating = false) {
     itemId = insertRes.insertId;
   } else {
     if (!itemId) {
-      throw new Error('ID requerido para actualizar');
+      throw new Error("ID requerido para actualizar");
     }
 
     await q(
@@ -145,13 +180,16 @@ async function upsert(data = {}, creating = false) {
     );
   }
 
-  // Si viene bodegaId, manejamos el stock en bodega_items
-  if (bodegaId != null) {
+  // Si viene bodegaId y cantidad viene explícitamente, manejamos el stock en bodega_items
+  if (bodegaId != null && cantidad != null) {
     const existing = await q(
-      `SELECT * FROM ${TABLE_BODEGA_ITEMS}
-       WHERE id_bodega = ? AND id_item = ?`,
+      `SELECT qty FROM ${TABLE_BODEGA_ITEMS}
+       WHERE id_bodega = ? AND id_item = ?
+       LIMIT 1`,
       [bodegaId, itemId]
     );
+
+    const oldQty = existing.length ? Number(existing[0].qty || 0) : 0;
 
     if (!existing.length) {
       if (cantidad > 0) {
@@ -161,6 +199,7 @@ async function upsert(data = {}, creating = false) {
           [bodegaId, itemId, cantidad]
         );
       }
+      // si cantidad = 0 y no existía fila, no insertamos (para no ensuciar la tabla)
     } else {
       // Ya existe relación, actualizamos qty (puede ser 0)
       await q(
@@ -170,14 +209,29 @@ async function upsert(data = {}, creating = false) {
         [cantidad, bodegaId, itemId]
       );
     }
+
+    // ✅ CAMBIO: registrar movimiento SOLO por el DELTA
+    const delta = Number(cantidad) - Number(oldQty);
+    if (delta !== 0) {
+      await registrarMovimiento({
+        itemId,
+        bodegaId,
+        qty: Math.abs(delta),
+        tipo: delta > 0 ? "ingreso" : "egreso",
+        motivo: delta > 0 ? "Ingreso de stock (ajuste) desde la app" : "Egreso de stock (ajuste) desde la app",
+        meta: {
+          oldQty,
+          newQty: cantidad,
+          delta,
+          creating: !!creating,
+        },
+      });
+    }
   }
 
   return { id: itemId };
 }
 
-/**
- * Elimina un ítem y todas sus relaciones en bodega_items.
- */
 /**
  * Elimina un ítem y todas sus relaciones en bodega_items,
  * registrando un EGRESO en item_movimientos por cada bodega
@@ -186,14 +240,11 @@ async function upsert(data = {}, creating = false) {
 async function remove(id) {
   const itemId = Number(id);
   if (!itemId) {
-    throw new Error('ID inválido');
+    throw new Error("ID inválido");
   }
 
   // 1) Leer el stock actual por bodega para este ítem
-  const stockRows = await q(
-    `SELECT id_bodega, qty FROM ${TABLE_BODEGA_ITEMS} WHERE id_item = ?`,
-    [itemId]
-  );
+  const stockRows = await q(`SELECT id_bodega, qty FROM ${TABLE_BODEGA_ITEMS} WHERE id_item = ?`, [itemId]);
 
   // 2) Registrar un movimiento de EGRESO por cada bodega con stock
   for (const row of stockRows) {
@@ -201,43 +252,27 @@ async function remove(id) {
     if (!qty) continue;
 
     const meta = {
-      source: 'api/items DELETE',
-      reason: 'deleteItem',
+      source: "api/items DELETE",
+      reason: "deleteItem",
     };
 
     await q(
-      `INSERT INTO item_movimientos
+      `INSERT INTO ${TABLE_MOVIMIENTOS}
         (id_item, id_bodega_origen, id_bodega_destino, qty, tipo, motivo, meta)
        VALUES (?, ?, NULL, ?, 'egreso', ?, ?)`,
-      [
-        itemId,
-        row.id_bodega,
-        qty,
-        'Eliminación de ítem desde la app',
-        JSON.stringify(meta),
-      ]
+      [itemId, row.id_bodega, qty, "Eliminación de ítem desde la app", JSON.stringify(meta)]
     );
   }
 
   // 3) Borrar el stock en bodega_items
-  await q(
-    `DELETE FROM ${TABLE_BODEGA_ITEMS} WHERE id_item = ?`,
-    [itemId]
-  );
+  await q(`DELETE FROM ${TABLE_BODEGA_ITEMS} WHERE id_item = ?`, [itemId]);
 
   // 4) Borrar el ítem de la tabla items
-  await q(
-    `DELETE FROM ${TABLE_ITEMS} WHERE id_item = ?`,
-    [itemId]
-  );
+  await q(`DELETE FROM ${TABLE_ITEMS} WHERE id_item = ?`, [itemId]);
 
   return { id: itemId };
 }
 
-
-/**
- * Mueve cantidad de un ítem entre bodegas (bodega_items).
- */
 /**
  * Mueve cantidad de un ítem entre bodegas (bodega_items)
  * y registra una TRANSFERENCIA en item_movimientos.
@@ -249,7 +284,7 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
   const qty = Number(cantidad);
 
   if (!itemId || !fromId || !toId || !qty || qty <= 0) {
-    throw new Error('Parámetros inválidos para mover cantidad');
+    throw new Error("Parámetros inválidos para mover cantidad");
   }
 
   // 1) Validamos stock en origen
@@ -261,12 +296,12 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
   const fromRow = fromRows[0];
 
   if (!fromRow) {
-    throw new Error('No existe stock en la bodega de origen');
+    throw new Error("No existe stock en la bodega de origen");
   }
 
   const currentFromQty = Number(fromRow.qty || 0);
   if (currentFromQty < qty) {
-    throw new Error('Stock insuficiente en la bodega de origen');
+    throw new Error("Stock insuficiente en la bodega de origen");
   }
 
   // 2) Leemos destino (si existe)
@@ -287,7 +322,6 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
       [newFromQty, fromId, itemId]
     );
   } else {
-    // Si queda en 0, borramos el registro
     await q(
       `DELETE FROM ${TABLE_BODEGA_ITEMS}
        WHERE id_bodega = ? AND id_item = ?`,
@@ -317,23 +351,16 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
 
   // 5) Registrar la TRANSFERENCIA en item_movimientos
   const meta = {
-    source: 'api/items/:id/move',
+    source: "api/items/:id/move",
     fromBodegaId: fromId,
     toBodegaId: toId,
   };
 
   await q(
-    `INSERT INTO item_movimientos
+    `INSERT INTO ${TABLE_MOVIMIENTOS}
       (id_item, id_bodega_origen, id_bodega_destino, qty, tipo, motivo, meta)
      VALUES (?, ?, ?, ?, 'transferencia', ?, ?)`,
-    [
-      itemId,
-      fromId,
-      toId,
-      qty,
-      'Transferencia de stock entre bodegas desde la app',
-      JSON.stringify(meta),
-    ]
+    [itemId, fromId, toId, qty, "Transferencia de stock entre bodegas desde la app", JSON.stringify(meta)]
   );
 
   return {
@@ -350,11 +377,11 @@ async function moveQty({ id, fromBodegaId, toBodegaId, cantidad }) {
 async function getMovements(id) {
   const itemId = Number(id);
   if (!itemId) {
-    throw new Error('ID inválido');
+    throw new Error("ID inválido");
   }
 
   const rows = await q(
-    `SELECT 
+    `SELECT
         m.*,
         bo.nombre AS bodega_origen_nombre,
         bd.nombre AS bodega_destino_nombre
@@ -369,8 +396,6 @@ async function getMovements(id) {
   return rows;
 }
 
-
-
 module.exports = {
   list,
   get,
@@ -379,4 +404,3 @@ module.exports = {
   moveQty,
   getMovements,
 };
-

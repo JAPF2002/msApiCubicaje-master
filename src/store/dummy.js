@@ -1,3 +1,5 @@
+/*C:\Users\japf2\Desktop\Tesis Cubicaje\Proyecto\proyectoPrincipal\msApiCubicaje-master\src\store\dummy.js*/
+
 const db = {
     spaces: [
         {

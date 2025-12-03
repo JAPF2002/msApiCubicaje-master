@@ -1,3 +1,4 @@
+/*C:\Users\japf2\Desktop\Tesis Cubicaje\Proyecto\proyectoPrincipal\msApiCubicaje-master\src\api\components\bodega\controller\controller.js*/
 const TABLE = 'bodegas';
 
 module.exports = function (injectedStore) {
