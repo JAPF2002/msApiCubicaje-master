@@ -23,7 +23,7 @@ async function list(req, res) {
     const params = [];
 
     if (id_empleado) {
-      where = "WHERE s.id_empleado = ?";
+      where = `WHERE s.id_empleado = ?`;
       params.push(Number(id_empleado));
     } else if (estado && estado !== "all") {
       where = "WHERE s.estado = ?";
@@ -33,14 +33,18 @@ async function list(req, res) {
     const sql = `
       SELECT
         s.*,
-        u.nombre AS empleado_nombre
+        u.nombre AS empleado_nombre,
+        rev.id_usuario AS revisor_id,
+        rev.nombre AS revisor_nombre
       FROM solicitudes s
       LEFT JOIN usuarios u ON u.id_usuario = s.id_empleado
+      LEFT JOIN usuarios rev ON rev.id_usuario = NULLIF(s.leida_por_empleado, 0)
       ${where}
       ORDER BY s.id_solicitud DESC
     `;
 
     const rows = await q(sql, params);
+    console.log(rows)
     return response.success(req, res, 200, rows);
   } catch (err) {
     console.log("[solicitud.controller] list error:", err?.message);
@@ -82,12 +86,12 @@ async function insert(req, res) {
 async function updateEstado(req, res) {
   try {
     const id = Number(req.params.id);
-
+    const { id_usuario } = req.body
     // acepto { estado } y también { status } por si acaso
     const estado = String(req.body?.estado ?? req.body?.status ?? "").trim();
 
-    if (!id || !estado) {
-      return response.error(req, res, 400, "Faltan datos: id y estado");
+    if (!id || !estado || !id_usuario) {
+      return response.error(req, res, 400, "Faltan datos: id, estado o id_usuario");
     }
     if (!ESTADOS_VALIDOS.has(estado)) {
       return response.error(req, res, 400, `Estado inválido: ${estado}`);
@@ -95,11 +99,11 @@ async function updateEstado(req, res) {
 
     const sql = `
       UPDATE solicitudes
-      SET estado = ?, fecha_respuesta = NOW()
+      SET estado = ?, fecha_respuesta = NOW(), leida_por_empleado = ?
       WHERE id_solicitud = ?
     `;
 
-    const result = await q(sql, [estado, id]);
+    const result = await q(sql, [estado, id_usuario, id]);
 
     // mysql: affectedRows
     const affected = result?.affectedRows ?? 0;

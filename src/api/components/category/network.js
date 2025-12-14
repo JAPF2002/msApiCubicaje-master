@@ -2,9 +2,12 @@
 
 const express = require('express');
 const router = express.Router();
+const {verificarToken} = require("../../../middleware/auth.middleware")
 
 // Este store es el wrapper que habla con msMysqlCubicaje (src/store.js)
 const store = require('../../../store');
+
+router.use(verificarToken)
 
 /**
  * GET /api/categorias

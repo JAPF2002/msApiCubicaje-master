@@ -13,6 +13,7 @@ const categoryRouter = require("./components/category/network");
 const itemRouter = require("./components/item/network");
 const solicitudRouter = require("./components/solicitud/network");
 const movimientoRouter = require("./components/movimiento/network"); // ✅ NUEVO
+const usuarioRouter = require("./components/usuario/network");
 
 const app = express();
 
@@ -36,6 +37,7 @@ app.use("/api/categorias", categoryRouter);
 app.use("/api/items", itemRouter);
 app.use("/api/solicitudes", solicitudRouter);
 app.use("/api/movimientos", movimientoRouter); // ✅ NUEVO
+app.use("/api/usuario", usuarioRouter);
 
 app.listen(config.api.port, () => {
   console.log("msApiCubicaje escuchando en el puerto", config.api.port);

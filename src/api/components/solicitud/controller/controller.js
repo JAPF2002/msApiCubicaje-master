@@ -1,3 +1,5 @@
+/*C:\Users\japf2\Desktop\Tesis Cubicaje\Proyecto\proyectoPrincipal\msApiCubicaje-master\src\api\components\solicitud\controller\controller.js*/
+
 const pool = require("../../../utils/connection");
 
 function q(sql, params = []) {

@@ -1,0 +1,9 @@
+{
+  "rut": "11111111-1",
+  "password": "hash-demo"
+}
+
+{
+    "rut": "22222222-2",
+    "password: "polapolapola"
+}

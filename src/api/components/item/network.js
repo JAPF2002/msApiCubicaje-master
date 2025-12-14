@@ -12,6 +12,8 @@ const db = require("../../../store");
 // Servicio de auto-ubicación
 const { asignarItemAuto } = require("../bodega/cubicaje.service");
 
+const { verificarToken } = require("../../../middleware/auth.middleware")
+
 // Wrapper a Promesa usando db.query (callback-style)
 function q(sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -89,6 +91,8 @@ async function registrarTransferencia(itemId, fromId, toId, qty) {
 /* =========================================================================
  * GET /api/items
  * ========================================================================= */
+
+router.use(verificarToken)
 
 router.get("/", async (req, res) => {
   try {

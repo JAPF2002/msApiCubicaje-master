@@ -8,6 +8,7 @@ const {
 } = require("./algoritmoCubicaje");
 
 const db = require("../../../store"); // tu módulo original
+const {verificarToken} = require("../../../middleware/auth.middleware")
 
 // Wrapper a Promesa usando db.query (callback-style adaptado)
 function q(sql, params = []) {
@@ -765,6 +766,8 @@ async function compactarBodegaTetris(id_bodega, opts = {}) {
   return { movimientos, mensaje: `Compactación OK. Movimientos: ${movimientos.length}` };
 }
 
+router.use(verificarToken)
+
 /**
  * POST /api/bodegas/:id/compactar-tetris
  * Body opcional: { "dryRun": true }
@@ -834,10 +837,11 @@ router.get("/", async (req, res) => {
          b.fecha_actualizacion AS updated_at,
          l.ancho               AS layout_ancho,
          l.largo               AS layout_largo,
-         l.mapa_json            AS layout_mapa_json
+         l.mapa_json            AS layout_mapa_json,
+         c.nombre              AS nombre_ciudad
        FROM bodegas b
-       LEFT JOIN bodega_layouts l
-         ON l.id_bodega = b.id_bodega
+       LEFT JOIN bodega_layouts l ON l.id_bodega = b.id_bodega
+       INNER JOIN ciudades c ON c.id_ciudad = b.ciudad
        WHERE b.fecha_eliminacion IS NULL
        ORDER BY b.id_bodega ASC`
     );
@@ -847,6 +851,20 @@ router.get("/", async (req, res) => {
     console.log("[GET /api/bodegas] ERROR:", err);
     res.status(500).json({ error: true, status: 500, body: "Error obteniendo bodegas" });
   }
+});
+
+router.get("/ciudades", async (req, res) => {
+    try {
+      const sql = `SELECT id_ciudad, nombre
+      FROM ciudades ORDER BY id_ciudad`;
+      const rows = await q(sql);
+      res.json({ ciudades: rows });
+    } catch (error) {
+      console.log(error)
+      res.status(400).json({
+        error: true, body: "Errpr obteniendo las ciudades"
+      })
+    }
 });
 
 router.get("/:id", async (req, res) => {
@@ -1098,7 +1116,7 @@ router.post("/:id/recubicar-prioridad", async (req, res) => {
 });
 
 /* =========================================================================
- *  GET /api/bodegas/:id/ubicaciones  ✅ (con expandUnits=1)
+ *  GET /api/bodegas/:id/ubicaciones  
  * ========================================================================= */
 
 router.get("/:id/ubicaciones", async (req, res) => {
